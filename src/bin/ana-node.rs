@@ -689,6 +689,47 @@ mod network_security_tests {
     }
 
 
+
+    #[test]
+    fn peer_can_request_genesis_chain_over_tcp() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let chain: SharedChain = Arc::new(Mutex::new(ChainState::new()));
+        let peers: Peers = Arc::new(Vec::new());
+        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let data_file = std::env::temp_dir().join(format!("ana-tcp-chain-{}.json", std::process::id()));
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle(stream, chain, peers, seen, pool, data_file, active);
+        });
+
+        let mut client = TcpStream::connect(address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let request = Message {
+            kind: "get_chain".into(),
+            transaction: None, block: None, blocks: None, address: None,
+            balance: None, nonce: None, transaction_id: None,
+            transaction_state: None, confirmed_height: None, confirmations: None,
+            node_status: None,
+        };
+        let mut wire = authenticated_wire(&request).unwrap();
+        wire.push(b'\\n');
+        client.write_all(&wire).unwrap();
+
+        let mut response_line = Vec::new();
+        BufReader::new(client).read_until(b'\\n', &mut response_line).unwrap();
+        let response: AuthenticatedMessage = serde_json::from_slice(&response_line).unwrap();
+        assert_eq!(response.message.kind, "blocks");
+        let blocks = response.message.blocks.unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].height, 0);
+
+        server.join().unwrap();
+    }
+
     #[test]
     fn node_status_is_served_over_a_real_tcp_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

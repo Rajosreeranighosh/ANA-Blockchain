@@ -15,6 +15,7 @@ pub const DIFFICULTY_RETARGET_INTERVAL: u64 = 10;
 pub const TARGET_BLOCK_SECONDS: u64 = 30;
 pub const MIN_TESTNET_DIFFICULTY: u16 = 4;
 pub const MAX_TESTNET_DIFFICULTY: u16 = 24;
+pub const MEDIAN_TIME_WINDOW: usize = 11;
 pub const RANDOMX_SEED: &[u8] = b"ANA-TESTNET-RANDOMX-SEED-v1";
 
 /// Parse a human ANA amount without floating-point rounding.
@@ -270,6 +271,32 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_time_past_uses_the_upper_median_of_recent_blocks() {
+        let mut blocks = vec![genesis_block()];
+        for (height, timestamp) in [100, 110, 120, 130, 140].iter().enumerate() {
+            let mut block = genesis_block();
+            block.height = height as u64 + 1;
+            block.timestamp = *timestamp;
+            blocks.push(block);
+        }
+        assert_eq!(median_time_past(&blocks).unwrap(), 120);
+    }
+
+    #[test]
+    fn block_timestamp_must_be_greater_than_median_time_past() {
+        let mut blocks = vec![genesis_block()];
+        for height in 1..=5 {
+            let mut block = genesis_block();
+            block.height = height;
+            block.timestamp = 1_764_096_000 + height * 10;
+            blocks.push(block);
+        }
+        let median = median_time_past(&blocks).unwrap();
+        assert!(validate_block_timestamp(&blocks, median).is_err());
+        assert!(validate_block_timestamp(&blocks, median + 1).is_ok());
+    }
 
     fn retarget_history(elapsed: u64, tip_difficulty: u16) -> Vec<Block> {
         let genesis = genesis_block();
@@ -580,9 +607,7 @@ impl ChainState {
         if block.previous != previous.hash {
             bail!("previous block hash mismatch");
         }
-        if block.timestamp < previous.timestamp {
-            bail!("block timestamp moved backwards");
-        }
+        validate_block_timestamp(&self.blocks, block.timestamp)?;
         let expected_difficulty = expected_next_difficulty(&self.blocks)?;
         if block.difficulty != expected_difficulty {
             bail!("unexpected block difficulty: expected {expected_difficulty}, got {}", block.difficulty);
@@ -622,8 +647,10 @@ impl ChainState {
         }
         let previous = self.tip();
         let height = previous.height.checked_add(1).context("height overflow")?;
+        let median = median_time_past(&self.blocks)?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-            .max(previous.timestamp);
+            .max(previous.timestamp.checked_add(1).context("timestamp overflow")?)
+            .max(median.checked_add(1).context("median timestamp overflow")?);
         let mut block = Block {
             height,
             previous: previous.hash.clone(),

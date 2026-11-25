@@ -19,5 +19,5 @@ jobs:
       - name: Compile and test all targets
         env:
           CMAKE_POLICY_VERSION_MINIMUM: '3.5'
-          LIBRARY_PATH: /usr/lib/x86_64-linux-gnu
+          CXXSTDLIB: stdc++
         run: cargo test --all-targets

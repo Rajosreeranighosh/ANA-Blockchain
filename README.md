@@ -98,3 +98,29 @@ To create and verify a copy of an encrypted wallet:
 cargo run --release --bin ana-wallet -- backup wallet.encrypted.json wallet-backup.encrypted.json
 ```
 The backup command first unlocks the source, refuses to overwrite an existing destination, writes an owner-only file on Unix, then verifies that the copied keystore can be unlocked. Store the passphrase separately from both wallet copies. Keep at least two backups in separate secure locations. Never commit wallet files or passphrases to source control. A forgotten passphrase cannot be reset.
+
+
+## Reusable wallet library API (v1)
+
+Applications can use the public `Wallet` type from the `ana_blockchain` crate instead of shelling out to the CLI:
+
+```rust
+use ana_blockchain::Wallet;
+use std::path::Path;
+
+let wallet = Wallet::open(
+    Path::new("wallet.encrypted.json"),
+    b"your wallet passphrase",
+)?;
+println!("Address: {}", wallet.address());
+
+let tx = wallet.sign_transaction(
+    "ana1<recipient-public-key-hex>",
+    1_000_000, // 0.01 ANA in atomic units
+    10_000,    // 0.0001 ANA fee
+    0,         // nonce obtained from the node
+)?;
+println!("Signed transaction: {}", tx.id()?);
+```
+
+The API supports encrypted wallet creation, unlocking, public address/key access, and transaction signing. It does not store passphrases, query node balances, broadcast transactions, or manage nonce state; applications must obtain the current nonce from a trusted node and submit the returned signed transaction using the node protocol. Keep unlocked wallet handles short-lived. This API is experimental and has not been independently audited.

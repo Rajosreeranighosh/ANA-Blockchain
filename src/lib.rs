@@ -870,3 +870,86 @@ mod wallet_migration_tests {
         assert!(encrypt_wallet_key(&encrypted, &key, b"another sufficiently long passphrase").is_err());
     }
 }
+
+
+/// An unlocked encrypted ANA wallet handle.
+///
+/// The private signing key is kept inside this type; callers receive the public
+/// address and signed transactions, not raw private-key bytes. Keep this handle
+/// short-lived and do not log or serialize it.
+pub struct Wallet {
+    signing_key: SigningKey,
+}
+
+impl Wallet {
+    /// Create a new encrypted wallet and return its ANA address.
+    pub fn create(path: &Path, passphrase: &[u8]) -> Result<String> {
+        create_encrypted_wallet(path, passphrase)
+    }
+
+    /// Unlock an existing encrypted wallet.
+    pub fn open(path: &Path, passphrase: &[u8]) -> Result<Self> {
+        let signing_key = open_encrypted_wallet(path, passphrase)?;
+        Ok(Self { signing_key })
+    }
+
+    /// Return this wallet's public ANA address.
+    pub fn address(&self) -> String {
+        address(&self.signing_key.verifying_key())
+    }
+
+    /// Return the public Ed25519 key as lowercase hexadecimal.
+    pub fn public_key_hex(&self) -> String {
+        hex::encode(self.signing_key.verifying_key().to_bytes())
+    }
+
+    /// Sign and locally verify a transaction for submission to an ANA node.
+    /// Amount and fee are atomic units (1 ANA = 100,000,000 atomic units).
+    pub fn sign_transaction(
+        &self,
+        recipient: &str,
+        amount: u64,
+        fee: u64,
+        nonce: u64,
+    ) -> Result<Transaction> {
+        sign(&self.signing_key, recipient.to_owned(), amount, fee, nonce)
+    }
+}
+
+#[cfg(test)]
+mod wallet_api_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn wallet_api_creates_unlocks_and_signs_without_exposing_secret_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-wallet.json");
+        let expected_address = Wallet::create(&path, b"a sufficiently long API passphrase").unwrap();
+        let wallet = Wallet::open(&path, b"a sufficiently long API passphrase").unwrap();
+
+        assert_eq!(wallet.address(), expected_address);
+        assert_eq!(wallet.public_key_hex().len(), 64);
+
+        let recipient = address(&SigningKey::generate(&mut OsRng).verifying_key());
+        let tx = wallet.sign_transaction(&recipient, COIN, COIN / 100, 0).unwrap();
+        tx.verify().unwrap();
+        assert_eq!(tx.from, expected_address);
+        assert_eq!(tx.to, recipient);
+        assert_eq!(tx.amount, COIN);
+        assert_eq!(tx.fee, COIN / 100);
+        assert_eq!(tx.nonce, 0);
+        assert!(Wallet::open(&path, b"wrong passphrase").is_err());
+    }
+
+    #[test]
+    fn wallet_api_rejects_invalid_recipient_and_zero_amount() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-wallet.json");
+        Wallet::create(&path, b"a sufficiently long API passphrase").unwrap();
+        let wallet = Wallet::open(&path, b"a sufficiently long API passphrase").unwrap();
+        assert!(wallet.sign_transaction("not-an-address", 1, 0, 0).is_err());
+        let recipient = address(&SigningKey::generate(&mut OsRng).verifying_key());
+        assert!(wallet.sign_transaction(&recipient, 0, 0, 0).is_err());
+    }
+}

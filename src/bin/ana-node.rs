@@ -55,11 +55,46 @@ type Seen = Arc<Mutex<HashSet<String>>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
 type SyncSessions = Arc<Mutex<BTreeMap<String, Vec<Block>>>>;
 const MAX_BLOCKS_PER_PAGE: usize = 128;
+const MAX_SYNC_SESSIONS: usize = 16;
+const MAX_SYNC_BLOCKS: usize = 1_000_000;
 
 // Backward-compatible chain-sync metadata uses legacy optional fields:
 // request.address=start height, transaction_id=expected tip hash, nonce=page size;
 // response.address=page start, transaction_id=snapshot tip hash, nonce=next height,
 // confirmations=1 when more pages follow and 0 on the final page.
+fn store_sync_page(
+    sessions: &SyncSessions,
+    sync_id: String,
+    start: usize,
+    page: Vec<Block>,
+    next: usize,
+    more: bool,
+) -> Result<Option<Vec<Block>>> {
+    if page.is_empty() || next != start.saturating_add(page.len()) {
+        bail!("invalid chain-sync page bounds");
+    }
+    let mut sessions = sessions.lock().map_err(|_| anyhow::anyhow!("sync-session lock poisoned"))?;
+    if start == 0 {
+        if sessions.len() >= MAX_SYNC_SESSIONS && !sessions.contains_key(&sync_id) {
+            if let Some(oldest_key) = sessions.keys().next().cloned() { sessions.remove(&oldest_key); }
+        }
+        sessions.insert(sync_id.clone(), page);
+    } else {
+        let candidate = sessions.get_mut(&sync_id).context("unknown chain-sync session")?;
+        if candidate.len() != start || candidate.len().saturating_add(page.len()) > MAX_SYNC_BLOCKS {
+            sessions.remove(&sync_id);
+            bail!("chain-sync page is out of sequence or exceeds the block limit");
+        }
+        candidate.extend(page);
+    }
+    let candidate_len = sessions.get(&sync_id).map(Vec::len).unwrap_or(0);
+    if candidate_len > MAX_SYNC_BLOCKS {
+        sessions.remove(&sync_id);
+        bail!("chain-sync session exceeds the block limit");
+    }
+    if more { Ok(None) } else { Ok(sessions.remove(&sync_id)) }
+}
+
 fn chain_request(start: u64, sync_id: Option<String>) -> Message {
     Message { kind: "get_chain".into(), transaction: None, block: None, blocks: None,
         address: Some(start.to_string()), balance: None, nonce: Some(MAX_BLOCKS_PER_PAGE as u64),
@@ -377,14 +412,13 @@ fn handle(
                 let start = match start_text.parse::<usize>() { Ok(v) => v, Err(_) => return };
                 let next = next_height as usize;
                 if page.is_empty() || next != start.saturating_add(page.len()) { return; }
-                let complete = if let Ok(mut sessions) = sync_sessions.lock() {
-                    if start == 0 { sessions.insert(sync_id.clone(), page); }
-                    else if let Some(candidate) = sessions.get_mut(&sync_id) {
-                        if candidate.len() != start { return; }
-                        candidate.extend(page);
-                    } else { return; }
-                    if message.confirmations.unwrap_or(0) == 0 { sessions.remove(&sync_id) } else { None }
-                } else { return; };
+                let complete = match store_sync_page(
+                    &sync_sessions, sync_id.clone(), start, page, next,
+                    message.confirmations.unwrap_or(0) != 0,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => { eprintln!("Rejected chain-sync page: {error}"); return; }
+                };
                 if let Some(blocks) = complete {
                     let (changed, displaced) = if let Ok(mut state) = chain.lock() {
                         let old_blocks = state.blocks.clone();
@@ -606,6 +640,26 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    #[test]
+    fn chain_sync_accumulates_pages_in_order_and_completes_only_on_final_page() {
+        let sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
+        let genesis = ChainState::new().blocks[0].clone();
+        assert!(store_sync_page(&sessions, "tip-a".into(), 0, vec![genesis.clone()], 1, true).unwrap().is_none());
+        let complete = store_sync_page(&sessions, "tip-a".into(), 1, vec![genesis], 2, false).unwrap().unwrap();
+        assert_eq!(complete.len(), 2);
+        assert!(sessions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chain_sync_rejects_out_of_order_and_unknown_sessions() {
+        let sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
+        let genesis = ChainState::new().blocks[0].clone();
+        assert!(store_sync_page(&sessions, "tip-b".into(), 0, vec![genesis.clone()], 1, true).unwrap().is_none());
+        assert!(store_sync_page(&sessions, "tip-b".into(), 2, vec![genesis.clone()], 3, false).is_err());
+        assert!(!sessions.lock().unwrap().contains_key("tip-b"));
+        assert!(store_sync_page(&sessions, "tip-c".into(), 1, vec![genesis], 2, false).is_err());
     }
 
     #[test]

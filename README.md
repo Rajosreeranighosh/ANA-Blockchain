@@ -31,9 +31,9 @@ cargo run --release --bin ana-node -- 127.0.0.1:19001 node-a.json miner-address
 ```
 Start a second node in another terminal:
 ```sh
-cargo run --release --bin ana-node -- 127.0.0.1:19002 node-b.json another-miner-address 127.0.0.1:19001
+cargo run --release --bin ana-node -- 127.0.0.1:19002 node-b.json none 127.0.0.1:19001
 ```
-The nodes request the peer chain at startup, validate received blocks, persist accepted state, and gossip new blocks. Configure peers in both directions for resilient propagation.
+The nodes request the peer chain at startup, validate received blocks, persist accepted state, and gossip new blocks. The first node mines; the second is an observer (`none`) to avoid two local miners creating competing tips. Configure peers in both directions for resilient propagation.
 
 ## Current testnet-alpha limitations
 - Nodes currently mine empty blocks. Transaction relay exists, but transactions are not yet assembled into blocks or confirmed.

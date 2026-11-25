@@ -314,6 +314,7 @@ mod tests {
             miner: address(&miner.verifying_key()),
             transactions: vec![tx],
             nonce: 0,
+            difficulty: TESTNET_DIFFICULTY,
             hash: String::new(),
         };
         let before = ledger.clone();
@@ -461,8 +462,13 @@ impl ChainState {
             difficulty: TESTNET_DIFFICULTY,
             hash: String::new(),
         };
+        let flags = RandomxFlags::default();
+        let cache = RandomxCache::new(flags, RANDOMX_SEED)
+            .context("RandomX cache initialization failed")?;
+        let vm = RandomxVm::new(flags, &cache)
+            .context("RandomX VM initialization failed")?;
         loop {
-            let digest = randomx_hash(&pow_input(&block)?)?;
+            let digest = vm.hash(&pow_input(&block)?);
             if meets_pow_target(&digest, block.difficulty) {
                 block.hash = hex::encode(digest);
                 return Ok(block);

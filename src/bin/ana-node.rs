@@ -162,8 +162,12 @@ fn main() -> Result<()> {
     }
     let bind = &args[1];
     let data_file = PathBuf::from(&args[2]);
-    let miner = args[3].clone();
-    validate_address(&miner)?;
+    let miner = if args[3] == "none" {
+        None
+    } else {
+        validate_address(&args[3])?;
+        Some(args[3].clone())
+    };
     let peers: Peers = Arc::new(args.iter().skip(4).cloned().collect());
     let chain = Arc::new(Mutex::new(ChainState::load(&data_file)?));
     let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
@@ -180,33 +184,36 @@ fn main() -> Result<()> {
         });
     }
 
-    let mining_chain = chain.clone();
-    let mining_peers = peers.clone();
-    let mining_file = data_file.clone();
-    let mining_miner = miner.clone();
-    thread::spawn(move || loop {
-        let result = mining_chain.lock().map_err(|_| anyhow::anyhow!("chain lock poisoned"))
-            .and_then(|state| state.mine_next(mining_miner.clone()));
-        match result {
-            Ok(block) => {
-                let accepted = mining_chain.lock().map(|mut state| state.append(block.clone()).is_ok()).unwrap_or(false);
-                if accepted {
-                    println!("Mined block #{} {}", block.height, block.hash);
-                    persist(&mining_chain, &mining_file);
-                    broadcast(&mining_peers, &Message {
-                        kind: "block".into(),
-                        transaction: None,
-                        block: Some(block),
-                        blocks: None,
-                    });
+    if let Some(miner_address) = miner {
+        let mining_chain = chain.clone();
+        let mining_peers = peers.clone();
+        let mining_file = data_file.clone();
+        thread::spawn(move || loop {
+            let result = mining_chain.lock().map_err(|_| anyhow::anyhow!("chain lock poisoned"))
+                .and_then(|state| state.mine_next(miner_address.clone()));
+            match result {
+                Ok(block) => {
+                    let accepted = mining_chain.lock().map(|mut state| state.append(block.clone()).is_ok()).unwrap_or(false);
+                    if accepted {
+                        println!("Mined block #{} {}", block.height, block.hash);
+                        persist(&mining_chain, &mining_file);
+                        broadcast(&mining_peers, &Message {
+                            kind: "block".into(),
+                            transaction: None,
+                            block: Some(block),
+                            blocks: None,
+                        });
+                    }
+                }
+                Err(error) => {
+                    eprintln!("mining error: {error}");
+                    thread::sleep(Duration::from_secs(3));
                 }
             }
-            Err(error) => {
-                eprintln!("mining error: {error}");
-                thread::sleep(Duration::from_secs(3));
-            }
-        }
-    });
+        });
+    } else {
+        println!("Observer mode: mining disabled.");
+    }
 
     for incoming in listener.incoming() {
         match incoming {

@@ -72,8 +72,11 @@ fn store_sync_page(
     next: usize,
     more: bool,
 ) -> Result<Option<Vec<Block>>> {
-    if page.is_empty() || next != start.saturating_add(page.len()) {
-        bail!("invalid chain-sync page bounds");
+    if page.is_empty()
+        || page.len() > MAX_BLOCKS_PER_PAGE
+        || next != start.checked_add(page.len()).context("chain-sync page height overflow")?
+    {
+        bail!("invalid chain-sync page bounds or page exceeds the configured limit");
     }
     let mut sessions = sessions.lock().map_err(|_| anyhow::anyhow!("sync-session lock poisoned"))?;
     let now = Instant::now();
@@ -675,6 +678,22 @@ mod tests {
         );
 
         assert!(store_sync_page(&sessions, "stale-tip".into(), 1, vec![genesis], 2, false).is_err());
+        assert!(sessions.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn chain_sync_rejects_pages_larger_than_protocol_limit() {
+        let sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
+        let genesis = ChainState::new().blocks[0].clone();
+        let oversized = vec![genesis; MAX_BLOCKS_PER_PAGE + 1];
+        assert!(store_sync_page(
+            &sessions,
+            "oversized-tip".into(),
+            0,
+            oversized,
+            (MAX_BLOCKS_PER_PAGE + 1) as usize,
+            false,
+        ).is_err());
         assert!(sessions.lock().unwrap().is_empty());
     }
 

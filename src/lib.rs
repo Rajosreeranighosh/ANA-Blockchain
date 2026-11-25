@@ -526,6 +526,26 @@ pub fn genesis_block() -> Block {
     }
 }
 
+/// Median of up to the last 11 timestamps in the existing chain.
+pub fn median_time_past(blocks: &[Block]) -> Result<u64> {
+    if blocks.is_empty() {
+        bail!("chain is empty");
+    }
+    let start = blocks.len().saturating_sub(MEDIAN_TIME_WINDOW);
+    let mut timestamps: Vec<u64> = blocks[start..].iter().map(|block| block.timestamp).collect();
+    timestamps.sort_unstable();
+    Ok(timestamps[timestamps.len() / 2])
+}
+
+/// A new block must be strictly later than the median of recent block timestamps.
+pub fn validate_block_timestamp(blocks: &[Block], timestamp: u64) -> Result<()> {
+    let median = median_time_past(blocks)?;
+    if timestamp <= median {
+        bail!("block timestamp must be greater than median-time-past ({median})");
+    }
+    Ok(())
+}
+
 /// Derive the next block difficulty using only the validated chain history.
 /// Retargets every 10 completed blocks, moving at most one bit per window.
 pub fn expected_next_difficulty(blocks: &[Block]) -> Result<u16> {

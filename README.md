@@ -149,3 +149,14 @@ New commands:
 - `ana-wallet send ...` — uses the same authenticated client for balance lookup and signed transaction submission.
 
 The current transaction-submit protocol has no admission acknowledgement. A successful send command means the request was written to the TCP connection, not that the node accepted it; query `tx-status` afterward. A `not_found` result may be temporary or indicate rejection. Status is node-local and confirmations can be reorganized.
+
+
+## Transaction admission acknowledgements v1
+
+When a wallet submits a signed transaction, the node now replies with a `transaction_result` message containing the transaction ID and an admission state:
+
+- `accepted` — verified and admitted to this node's mempool.
+- `already_known` — the node has already seen this transaction ID.
+- `rejected` — invalid signature, nonce, balance, or ordering, or an internal admission failure.
+
+The wallet verifies that the acknowledgement ID matches the submitted transaction and reports rejection rather than treating a successful TCP write as acceptance. Admission is not confirmation: continue using `ana-wallet tx-status` until the transaction is included in a block. Node status remains local and a later reorganization can change confirmation status.

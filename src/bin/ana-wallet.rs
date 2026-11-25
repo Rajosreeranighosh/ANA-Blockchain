@@ -71,7 +71,8 @@ fn main() -> Result<()> {
             let tx = sign(&key, args[3].clone(), amount, fee, nonce)?;
             let id = client.submit_transaction(tx)?;
             println!("Submitted transaction: {id}");
-            println!("The node protocol does not acknowledge admission yet. Check status with: ana-wallet tx-status {id} {}", args[6]);
+            println!("Node acknowledged admission to its mempool. This is not block confirmation.");
+            println!("Track confirmation with: ana-wallet tx-status {id} {}", args[6]);
         }
         Some("status") => {
             if args.len() != 3 { bail!("Usage: ana-wallet status <node-ip:port>"); }

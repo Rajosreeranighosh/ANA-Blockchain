@@ -1,15 +1,10 @@
 use ana_blockchain::{parse_amount, rpc::NodeClient, Wallet};
 use eframe::egui;
-use std::path::Path;
+use std::{path::Path,};
+use zeroize::Zeroize;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum Page {
-    Overview,
-    Send,
-    Receive,
-    Transactions,
-    Settings,
-}
+enum Page { Overview, Send, Receive, Transactions, Settings }
 
 struct AnaWalletApp {
     page: Page,
@@ -30,6 +25,7 @@ struct AnaWalletApp {
     transaction_state: String,
     message: String,
     qr_texture: Option<egui::TextureHandle>,
+    confirm_send: bool,
 }
 
 impl Default for AnaWalletApp {
@@ -53,17 +49,19 @@ impl Default for AnaWalletApp {
             transaction_state: String::new(),
             message: "Create a new wallet or open an encrypted ANA wallet file.".into(),
             qr_texture: None,
+            confirm_send: false,
         }
     }
 }
 
 impl AnaWalletApp {
     fn unlock(&mut self) {
-        match Wallet::open(Path::new(&self.wallet_path), self.passphrase.as_bytes()) {
+        let result = Wallet::open(Path::new(&self.wallet_path), self.passphrase.as_bytes());
+        self.passphrase.zeroize();
+        match result {
             Ok(wallet) => {
                 self.address = wallet.address();
                 self.wallet = Some(wallet);
-                self.passphrase.zeroize();
                 self.message = "Wallet opened. Connect to an ANA node to refresh your balance.".into();
                 self.balance = None;
                 self.nonce = None;
@@ -75,19 +73,28 @@ impl AnaWalletApp {
 
     fn create(&mut self) {
         if self.passphrase != self.confirm_passphrase {
-            self.message = "Passphrases do not match.".into();
+            self.passphrase.zeroize();
+            self.confirm_passphrase.zeroize();
+            self.message = "Passphrases did not match. Please enter them again.".into();
             return;
         }
-        match Wallet::create(Path::new(&self.wallet_path), self.passphrase.as_bytes()) {
-            Ok(address) => {
+        let result = Wallet::create(Path::new(&self.wallet_path), self.passphrase.as_bytes());
+        let opened = if result.is_ok() {
+            Wallet::open(Path::new(&self.wallet_path), self.passphrase.as_bytes())
+        } else {
+            Err(anyhow::anyhow!("wallet creation failed"))
+        };
+        self.passphrase.zeroize();
+        self.confirm_passphrase.zeroize();
+        match (result, opened) {
+            (Ok(address), Ok(wallet)) => {
                 self.address = address;
-                self.wallet = Wallet::open(Path::new(&self.wallet_path), self.passphrase.as_bytes()).ok();
-                self.passphrase.zeroize();
-                self.confirm_passphrase.zeroize();
+                self.wallet = Some(wallet);
                 self.qr_texture = None;
                 self.message = "Encrypted wallet created. Back up the wallet file and store its passphrase separately.".into();
             }
-            Err(error) => self.message = format!("Could not create wallet: {error:#}"),
+            (Err(error), _) => self.message = format!("Could not create wallet: {error:#}"),
+            (_, Err(error)) => self.message = format!("Wallet was created but could not be reopened: {error:#}"),
         }
     }
 
@@ -121,21 +128,12 @@ impl AnaWalletApp {
         };
         let amount = match parse_amount(self.amount.trim()) {
             Ok(value) if value > 0 => value,
-            Ok(_) => {
-                self.message = "Amount must be greater than zero.".into();
-                return;
-            }
-            Err(error) => {
-                self.message = format!("Invalid amount: {error:#}");
-                return;
-            }
+            Ok(_) => { self.message = "Amount must be greater than zero.".into(); return; }
+            Err(error) => { self.message = format!("Invalid amount: {error:#}"); return; }
         };
         let fee = match parse_amount(self.fee.trim()) {
             Ok(value) => value,
-            Err(error) => {
-                self.message = format!("Invalid fee: {error:#}");
-                return;
-            }
+            Err(error) => { self.message = format!("Invalid fee: {error:#}"); return; }
         };
         let Some(nonce) = self.nonce else {
             self.message = "Refresh the wallet balance before sending so the current nonce is known.".into();
@@ -147,13 +145,9 @@ impl AnaWalletApp {
         }
         let tx = match wallet.sign_transaction(self.recipient.trim(), amount, fee, nonce) {
             Ok(tx) => tx,
-            Err(error) => {
-                self.message = format!("Could not prepare transaction: {error:#}");
-                return;
-            }
+            Err(error) => { self.message = format!("Could not prepare transaction: {error:#}"); return; }
         };
-        let client = NodeClient::new(&self.node_address);
-        match client.submit_transaction(tx) {
+        match NodeClient::new(&self.node_address).submit_transaction(tx) {
             Ok(id) => {
                 self.transaction_id = id.clone();
                 self.transaction_state = "submitted to node mempool (not confirmed)".into();
@@ -172,42 +166,28 @@ impl AnaWalletApp {
         }
         match NodeClient::new(&self.node_address).transaction_status(self.transaction_id.trim()) {
             Ok(status) => {
-                self.transaction_state = format!(
-                    "{} — {} confirmation(s)",
-                    status.state, status.confirmations
-                );
-                self.message = "Transaction status is the connected node's local view; reorganizations can change it.".into();
+                self.transaction_state = format!("{} — {} confirmation(s)", status.state, status.confirmations);
+                self.message = "Status is the connected node's local view; reorganizations can change it.".into();
             }
             Err(error) => self.message = format!("Could not check transaction: {error:#}"),
         }
     }
 
     fn ensure_qr(&mut self, ctx: &egui::Context) {
-        if self.address.is_empty() || self.qr_texture.is_some() {
-            return;
-        }
+        if self.address.is_empty() || self.qr_texture.is_some() { return; }
         if let Ok(code) = qrcode::QrCode::new(self.address.as_bytes()) {
             let width = code.width();
-            let pixels = code
-                .to_colors()
-                .iter()
-                .map(|color| match color {
-                    qrcode::Color::Dark => egui::Color32::BLACK,
-                    qrcode::Color::Light => egui::Color32::WHITE,
-                })
-                .collect();
+            let pixels = code.to_colors().iter().map(|color| match color {
+                qrcode::Color::Dark => egui::Color32::BLACK,
+                qrcode::Color::Light => egui::Color32::WHITE,
+            }).collect();
             let image = egui::ColorImage::new([width, width], pixels);
-            self.qr_texture = Some(ctx.load_texture(
-                "ana-receive-address",
-                image,
-                egui::TextureOptions::NEAREST,
-            ));
+            self.qr_texture = Some(ctx.load_texture("ana-receive-address", image, egui::TextureOptions::NEAREST));
         }
     }
 
     fn amount_label(value: Option<u64>) -> String {
-        value
-            .map(|v| format!("{}.{:08} ANA", v / 100_000_000, v % 100_000_000))
+        value.map(|v| format!("{}.{:08} ANA", v / 100_000_000, v % 100_000_000))
             .unwrap_or_else(|| "—".into())
     }
 }
@@ -219,65 +199,42 @@ impl eframe::App for AnaWalletApp {
                 ui.heading("ANA Wallet");
                 ui.label("Experimental testnet");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.wallet.is_some() {
-                        ui.label("Wallet unlocked");
-                    } else {
-                        ui.label("No wallet open");
-                    }
+                    ui.label(if self.wallet.is_some() { "Wallet unlocked" } else { "No wallet open" });
                 });
             });
         });
 
-        egui::SidePanel::left("navigation")
-            .resizable(false)
-            .default_width(175.0)
-            .show(ctx, |ui| {
-                ui.add_space(12.0);
-                ui.heading("Wallet");
-                ui.add_space(10.0);
-                for (page, label) in [
-                    (Page::Overview, "Overview"),
-                    (Page::Send, "Send"),
-                    (Page::Receive, "Receive"),
-                    (Page::Transactions, "Transactions"),
-                    (Page::Settings, "Settings"),
-                ] {
-                    if ui.selectable_label(self.page == page, label).clicked() {
-                        self.page = page;
-                    }
-                }
-                ui.add_space(20.0);
-                if ui.button("Refresh balance").clicked() {
-                    self.refresh();
-                }
-                ui.separator();
-                ui.label("Network");
-                ui.label(if self.node_network.is_empty() { "Not connected" } else { &self.node_network });
-                if let Some(height) = self.node_height {
-                    ui.label(format!("Height: {height}"));
-                }
-            });
+        egui::SidePanel::left("navigation").resizable(false).default_width(175.0).show(ctx, |ui| {
+            ui.add_space(12.0);
+            ui.heading("Wallet");
+            ui.add_space(10.0);
+            for (page, label) in [
+                (Page::Overview, "Overview"), (Page::Send, "Send"), (Page::Receive, "Receive"),
+                (Page::Transactions, "Transactions"), (Page::Settings, "Settings"),
+            ] {
+                if ui.selectable_label(self.page == page, label).clicked() { self.page = page; }
+            }
+            ui.add_space(20.0);
+            if ui.button("Refresh balance").clicked() { self.refresh(); }
+            ui.separator();
+            ui.label("Network");
+            ui.label(if self.node_network.is_empty() { "Not connected" } else { &self.node_network });
+            if let Some(height) = self.node_height { ui.label(format!("Height: {height}")); }
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.wallet.is_none() {
                 ui.heading("Welcome to ANA Wallet");
-                ui.label("Create an encrypted wallet or open an existing wallet file.");
+                ui.label("Create a new encrypted wallet or open an existing wallet file.");
                 ui.add_space(16.0);
                 ui.label("Wallet file path");
                 ui.text_edit_singleline(&mut self.wallet_path);
                 ui.label("Passphrase (minimum 12 characters)");
                 ui.add(egui::TextEdit::singleline(&mut self.passphrase).password(true));
                 ui.horizontal(|ui| {
-                    if ui.button("Create new wallet").clicked() {
-                        self.create();
-                    }
-                    if ui.button("Open wallet").clicked() {
-                        self.unlock();
-                    }
+                    if ui.button("Create new wallet").clicked() { self.create(); }
+                    if ui.button("Open wallet").clicked() { self.unlock(); }
                 });
-                if !self.passphrase.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.unlock();
-                }
             } else {
                 match self.page {
                     Page::Overview => {
@@ -288,7 +245,6 @@ impl eframe::App for AnaWalletApp {
                             ui.heading(Self::amount_label(self.balance));
                             ui.label("Balance is read from the connected node.");
                         });
-                        ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             ui.group(|ui| {
                                 ui.label("Next transaction nonce");
@@ -301,14 +257,12 @@ impl eframe::App for AnaWalletApp {
                         });
                         ui.add_space(12.0);
                         ui.label("Your ANA address");
-                        ui.text_edit_singleline(&mut self.address);
+                        ui.add(egui::TextEdit::singleline(&mut self.address).interactive(false));
                         if ui.button("Copy address").clicked() {
                             ctx.copy_text(self.address.clone());
                             self.message = "Address copied.".into();
                         }
-                        if ui.button("Refresh from node").clicked() {
-                            self.refresh();
-                        }
+                        if ui.button("Refresh from node").clicked() { self.refresh(); }
                     }
                     Page::Send => {
                         ui.heading("Send ANA");
@@ -319,10 +273,8 @@ impl eframe::App for AnaWalletApp {
                         ui.label("Network fee (ANA)");
                         ui.text_edit_singleline(&mut self.fee);
                         ui.label(format!("Available balance: {}", Self::amount_label(self.balance)));
-                        if ui.button("Send transaction").clicked() {
-                            self.send();
-                        }
-                        ui.label("The wallet signs locally. The node receives the signed transaction over the current plaintext TCP protocol.");
+                        if ui.button("Review transaction").clicked() { self.confirm_send = true; }
+                        ui.label("The wallet signs locally. The node connection currently uses plaintext TCP.");
                     }
                     Page::Receive => {
                         ui.heading("Receive ANA");
@@ -332,30 +284,24 @@ impl eframe::App for AnaWalletApp {
                         if let Some(texture) = &self.qr_texture {
                             ui.image((texture.id(), egui::vec2(220.0, 220.0)));
                         }
-                        ui.text_edit_multiline(&mut self.address);
+                        ui.add(egui::TextEdit::singleline(&mut self.address).interactive(false));
                         if ui.button("Copy receive address").clicked() {
                             ctx.copy_text(self.address.clone());
                             self.message = "Receive address copied.".into();
                         }
                     }
                     Page::Transactions => {
-                        ui.heading("Transaction status");
-                        ui.label("This node API currently supports looking up a transaction by ID; it does not expose full wallet history yet.");
+                        ui.heading("Transaction lookup");
+                        ui.label("The current node API supports lookup by transaction ID, not full wallet history.");
                         ui.text_edit_singleline(&mut self.transaction_id);
-                        if ui.button("Check transaction").clicked() {
-                            self.check_transaction();
-                        }
-                        if !self.transaction_state.is_empty() {
-                            ui.label(&self.transaction_state);
-                        }
+                        if ui.button("Check transaction").clicked() { self.check_transaction(); }
+                        if !self.transaction_state.is_empty() { ui.label(&self.transaction_state); }
                     }
                     Page::Settings => {
                         ui.heading("Settings");
-                        ui.label("ANA node address");
+                        ui.label("ANA node address (host:port)");
                         ui.text_edit_singleline(&mut self.node_address);
-                        if ui.button("Connect and refresh").clicked() {
-                            self.refresh();
-                        }
+                        if ui.button("Connect and refresh").clicked() { self.refresh(); }
                         ui.separator();
                         ui.label("Wallet file");
                         ui.text_edit_singleline(&mut self.wallet_path);
@@ -367,14 +313,33 @@ impl eframe::App for AnaWalletApp {
                             self.qr_texture = None;
                             self.message = "Wallet locked in this application session.".into();
                         }
-                        ui.label("Wallet files are encrypted at rest using Argon2id and XChaCha20-Poly1305. Keep the passphrase separate from backups.");
+                        ui.label("Encrypted with Argon2id and XChaCha20-Poly1305. Keep the passphrase separate from backups.");
+                        ui.label("Remote-node traffic is plaintext TCP. Use loopback or a trusted VPN/private network only.");
                     }
                 }
             }
+
+            if self.confirm_send {
+                let mut do_send = false;
+                let mut cancel = false;
+                egui::Window::new("Confirm ANA transaction").collapsible(false).resizable(false).show(ctx, |ui| {
+                    ui.label(format!("Recipient: {}", self.recipient));
+                    ui.label(format!("Amount: {} ANA", self.amount));
+                    ui.label(format!("Fee: {} ANA", self.fee));
+                    ui.separator();
+                    ui.label("Check the address and amount carefully. Sending cannot be undone.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Confirm and send").clicked() { do_send = true; }
+                        if ui.button("Cancel").clicked() { cancel = true; }
+                    });
+                });
+                if do_send { self.confirm_send = false; self.send(); }
+                if cancel { self.confirm_send = false; }
+            }
+
             ui.add_space(18.0);
             ui.separator();
             ui.label(&self.message);
-            ui.add_space(4.0);
             ui.small("ANA is experimental testnet software. Do not use real funds. Private transactions are not enabled in consensus.");
         });
     }
@@ -387,9 +352,5 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([820.0, 560.0]),
         ..Default::default()
     };
-    eframe::run_native(
-        "ANA Wallet",
-        options,
-        Box::new(|_creation_context| Ok(Box::new(AnaWalletApp::default()))),
-    )
+    eframe::run_native("ANA Wallet", options, Box::new(|_cc| Ok(Box::new(AnaWalletApp::default()))))
 }

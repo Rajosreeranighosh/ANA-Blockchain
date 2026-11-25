@@ -742,7 +742,7 @@ struct EncryptedWalletFile {
 
 fn wallet_kek(passphrase: &[u8], salt: &[u8; 16]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
     use argon2::{Algorithm, Argon2, Params, Version};
-    let params = Params::new(19_456, 2, 1, Some(32)).context("invalid wallet KDF parameters")?;
+    let params = Params::new(19_456, 2, 1, Some(32)).map_err(|_| anyhow::anyhow!("invalid wallet KDF parameters"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = zeroize::Zeroizing::new([0u8; 32]);
     argon.hash_password_into(passphrase, salt, &mut *key)

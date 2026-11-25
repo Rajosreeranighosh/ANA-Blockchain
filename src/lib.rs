@@ -271,6 +271,47 @@ impl Ledger {
 mod tests {
     use super::*;
 
+    fn retarget_history(elapsed: u64, tip_difficulty: u16) -> Vec<Block> {
+        let genesis = genesis_block();
+        let mut blocks = vec![genesis.clone()];
+        for height in 1..=DIFFICULTY_RETARGET_INTERVAL {
+            blocks.push(Block {
+                height,
+                previous: String::new(),
+                timestamp: genesis.timestamp + elapsed * height / DIFFICULTY_RETARGET_INTERVAL,
+                miner: genesis.miner.clone(),
+                transactions: Vec::new(),
+                nonce: 0,
+                difficulty: if height == DIFFICULTY_RETARGET_INTERVAL { tip_difficulty } else { TESTNET_DIFFICULTY },
+                hash: String::new(),
+            });
+        }
+        blocks
+    }
+
+    #[test]
+    fn difficulty_retargets_up_when_blocks_are_too_fast() {
+        let blocks = retarget_history(10, TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&blocks).unwrap(), TESTNET_DIFFICULTY + 1);
+    }
+
+    #[test]
+    fn difficulty_retargets_down_when_blocks_are_too_slow() {
+        let blocks = retarget_history(1_000, TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&blocks).unwrap(), TESTNET_DIFFICULTY - 1);
+    }
+
+    #[test]
+    fn difficulty_retarget_is_bounded_and_waits_for_full_window() {
+        let fast = retarget_history(1, MAX_TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&fast).unwrap(), MAX_TESTNET_DIFFICULTY);
+        let slow = retarget_history(1_000, MIN_TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&slow).unwrap(), MIN_TESTNET_DIFFICULTY);
+        let mut partial = retarget_history(10, TESTNET_DIFFICULTY);
+        partial.pop();
+        assert_eq!(expected_next_difficulty(&partial).unwrap(), TESTNET_DIFFICULTY);
+    }
+
     #[test]
     fn signatures_detect_tampering() {
         let a = SigningKey::generate(&mut OsRng);

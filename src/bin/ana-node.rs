@@ -264,7 +264,7 @@ fn main() -> Result<()> {
 
     let listener = TcpListener::bind(bind)?;
     println!("ANA TESTNET node listening on {bind}; {} configured peers", peers.len());
-    println!("RandomX testnet difficulty: 8 bits; mining pending transactions.");
+    println!("RandomX testnet difficulty: starts at 8 bits; retargets every 10 completed blocks toward a 30-second target.");
     for peer in peers.iter() {
         send(peer, &Message {
             kind: "get_chain".into(), transaction: None, block: None,

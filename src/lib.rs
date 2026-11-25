@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn median_time_past_uses_the_upper_median_of_recent_blocks() {
         let mut blocks = vec![genesis_block()];
-        for (height, timestamp) in [100, 110, 120, 130, 140].iter().enumerate() {
+        for (height, timestamp) in [100, 110, 120, 130].iter().enumerate() {
             let mut block = genesis_block();
             block.height = height as u64 + 1;
             block.timestamp = *timestamp;

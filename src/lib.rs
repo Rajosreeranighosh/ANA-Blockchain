@@ -289,7 +289,7 @@ mod tests {
             miner: address(&miner.verifying_key()),
             transactions: vec![],
             nonce: 0,
-            difficulty: expected_next_difficulty(&self.blocks)?,
+            difficulty: TESTNET_DIFFICULTY,
             hash: String::new(),
         }
     }
@@ -590,7 +590,7 @@ impl ChainState {
             miner,
             transactions,
             nonce: 0,
-            difficulty: TESTNET_DIFFICULTY,
+            difficulty: expected_next_difficulty(&self.blocks)?,
             hash: String::new(),
         };
         let flags = RandomxFlags::default();

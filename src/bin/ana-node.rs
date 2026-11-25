@@ -53,6 +53,19 @@ type SharedChain = Arc<Mutex<ChainState>>;
 type Peers = Arc<Vec<String>>;
 type Seen = Arc<Mutex<HashSet<String>>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
+type SyncSessions = Arc<Mutex<BTreeMap<String, Vec<Block>>>>;
+const MAX_BLOCKS_PER_PAGE: usize = 128;
+
+// Backward-compatible chain-sync metadata uses legacy optional fields:
+// request.address=start height, transaction_id=expected tip hash, nonce=page size;
+// response.address=page start, transaction_id=snapshot tip hash, nonce=next height,
+// confirmations=1 when more pages follow and 0 on the final page.
+fn chain_request(start: u64, sync_id: Option<String>) -> Message {
+    Message { kind: "get_chain".into(), transaction: None, block: None, blocks: None,
+        address: Some(start.to_string()), balance: None, nonce: Some(MAX_BLOCKS_PER_PAGE as u64),
+        transaction_id: sync_id, transaction_state: None, confirmed_height: None,
+        confirmations: None, node_status: None }
+}
 
 const MAX_CONNECTIONS: usize = 64;
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -256,6 +269,7 @@ fn handle(
     pool: Mempool,
     data_file: PathBuf,
     active_connections: Arc<AtomicUsize>,
+    sync_sessions: SyncSessions,
 ) {
     let _connection_guard = ConnectionGuard(active_connections);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
@@ -290,11 +304,24 @@ fn handle(
     match message.kind.as_str() {
         "get_chain" => {
             if let Ok(state) = chain.lock() {
-                response(&mut stream, &Message {
-                    kind: "blocks".into(), transaction: None, block: None,
-                    blocks: Some(state.blocks.clone()), address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
-                });
+                let start = message.address.as_deref().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                let tip_hash = state.tip().hash.clone();
+                if message.transaction_id.as_deref().is_some_and(|expected| expected != tip_hash) { return; }
+                if start >= state.blocks.len() { return; }
+                let requested = message.nonce.unwrap_or(MAX_BLOCKS_PER_PAGE as u64) as usize;
+                let mut end = start.saturating_add(requested.min(MAX_BLOCKS_PER_PAGE)).min(state.blocks.len());
+                loop {
+                    let reply = Message { kind: "blocks".into(), transaction: None, block: None,
+                        blocks: Some(state.blocks[start..end].to_vec()), address: Some(start.to_string()),
+                        balance: None, nonce: Some(end as u64), transaction_id: Some(tip_hash.clone()),
+                        transaction_state: None, confirmed_height: None,
+                        confirmations: Some(u64::from(end < state.blocks.len())), node_status: None };
+                    if authenticated_wire(&reply).map(|bytes| bytes.len() < MAX_MESSAGE_BYTES as usize).unwrap_or(false) {
+                        response(&mut stream, &reply); break;
+                    }
+                    if end <= start + 1 { break; }
+                    end = start + (end - start) / 2;
+                }
             }
         }
         "get_account" => {
@@ -344,38 +371,44 @@ fn handle(
             }
         }
         "blocks" => {
-            if let Some(blocks) = message.blocks {
-                let (changed, displaced) = if let Ok(mut state) = chain.lock() {
-                    let old_blocks = state.blocks.clone();
-                    match state.replace_if_more_work(blocks) {
-                        Ok(true) => {
-                            let canonical: HashSet<String> = state.blocks.iter()
-                                .flat_map(|b| b.transactions.iter())
-                                .filter_map(|tx| tx.id().ok()).collect();
-                            let displaced: Vec<Transaction> = old_blocks.iter()
-                                .flat_map(|b| b.transactions.iter().cloned())
-                                .filter(|tx| tx.id().map(|id| !canonical.contains(&id)).unwrap_or(false))
-                                .collect();
-                            (true, displaced)
+            if let (Some(page), Some(sync_id), Some(next_height), Some(start_text)) =
+                (message.blocks, message.transaction_id, message.nonce, message.address)
+            {
+                let start = match start_text.parse::<usize>() { Ok(v) => v, Err(_) => return };
+                let next = next_height as usize;
+                if page.is_empty() || next != start.saturating_add(page.len()) { return; }
+                let complete = if let Ok(mut sessions) = sync_sessions.lock() {
+                    if start == 0 { sessions.insert(sync_id.clone(), page); }
+                    else if let Some(candidate) = sessions.get_mut(&sync_id) {
+                        if candidate.len() != start { return; }
+                        candidate.extend(page);
+                    } else { return; }
+                    if message.confirmations.unwrap_or(0) == 0 { sessions.remove(&sync_id) } else { None }
+                } else { return; };
+                if let Some(blocks) = complete {
+                    let (changed, displaced) = if let Ok(mut state) = chain.lock() {
+                        let old_blocks = state.blocks.clone();
+                        match state.replace_if_more_work(blocks) {
+                            Ok(true) => {
+                                let canonical: HashSet<String> = state.blocks.iter().flat_map(|b| b.transactions.iter())
+                                    .filter_map(|tx| tx.id().ok()).collect();
+                                let displaced = old_blocks.iter().flat_map(|b| b.transactions.iter().cloned())
+                                    .filter(|tx| tx.id().map(|id| !canonical.contains(&id)).unwrap_or(false)).collect();
+                                (true, displaced)
+                            }
+                            Ok(false) => (false, Vec::new()),
+                            Err(error) => { eprintln!("Rejected candidate chain: {error}"); (false, Vec::new()) }
                         }
-                        Ok(false) => (false, Vec::new()),
-                        Err(error) => { eprintln!("Rejected candidate chain: {error}"); (false, Vec::new()) }
+                    } else { (false, Vec::new()) };
+                    if changed {
+                        if let Ok(mut values) = pool.lock() { for tx in displaced { if let Ok(id) = tx.id() { values.insert(id, tx); } } }
+                        prune_mempool(&chain, &pool);
+                        persist_mempool_after_change(&pool, &data_file);
+                        persist(&chain, &data_file);
+                        println!("Switched to higher-work chain at height {}", chain.lock().map(|s| s.tip().height).unwrap_or(0));
                     }
-                } else { (false, Vec::new()) };
-                if changed {
-                    if let Ok(mut values) = pool.lock() {
-                        for tx in displaced { if let Ok(id) = tx.id() { values.insert(id, tx); } }
-                    }
-                    prune_mempool(&chain, &pool);
-                    persist_mempool_after_change(&pool, &data_file);
-                    persist(&chain, &data_file);
-                    println!("Switched to higher-work chain at height {}",
-                        chain.lock().map(|s| s.tip().height).unwrap_or(0));
-                    broadcast(&peers, &Message {
-                        kind: "get_chain".into(), transaction: None, block: None,
-                        blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
-                    });
+                } else {
+                    broadcast(&peers, &chain_request(next_height, Some(sync_id)));
                 }
             }
         }
@@ -405,11 +438,7 @@ fn handle(
                     });
                 } else {
                     eprintln!("Block does not extend local tip; requesting peer chain");
-                    broadcast(&peers, &Message {
-                        kind: "get_chain".into(), transaction: None, block: None,
-                        blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
-                    });
+                    broadcast(&peers, &chain_request(0, None));
                 }
             }
         }
@@ -487,11 +516,7 @@ fn main() -> Result<()> {
     if peer_token().is_none() { println!("WARNING: ANA_PEER_TOKEN is unset; inbound connections are restricted to loopback."); }
     println!("RandomX testnet difficulty: starts at 8 bits; retargets every 10 completed blocks toward a 30-second target.");
     for peer in peers.iter() {
-        send(peer, &Message {
-            kind: "get_chain".into(), transaction: None, block: None,
-            blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
-        });
+        send(peer, &chain_request(0, None));
     }
 
     if let Some(miner_address) = miner {
@@ -542,6 +567,7 @@ fn main() -> Result<()> {
     }
 
     let active_connections = Arc::new(AtomicUsize::new(0));
+    let sync_sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -558,7 +584,8 @@ fn main() -> Result<()> {
                 let m = pool.clone();
                 let f = data_file.clone();
                 let active = active_connections.clone();
-                thread::spawn(move || handle(stream, c, p, s, m, f, active));
+                let sync = sync_sessions.clone();
+                thread::spawn(move || handle(stream, c, p, s, m, f, active, sync));
             }
             Err(error) => eprintln!("connection error: {error}"),
         }
@@ -706,7 +733,7 @@ mod network_security_tests {
 
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle(stream, chain, peers, seen, pool, data_file, active);
+            handle(stream, chain, peers, seen, pool, data_file, active, Arc::new(Mutex::new(BTreeMap::new())));
         });
 
         let mut client = TcpStream::connect(address).unwrap();
@@ -765,6 +792,7 @@ mod network_security_tests {
                 b_pool,
                 b_data,
                 b_active,
+                Arc::new(Mutex::new(BTreeMap::new())),
             );
         });
 
@@ -792,6 +820,7 @@ mod network_security_tests {
                 a_pool,
                 a_data,
                 a_active,
+                Arc::new(Mutex::new(BTreeMap::new())),
             );
         });
 
@@ -863,6 +892,7 @@ mod network_security_tests {
                 server_pool,
                 server_file,
                 server_active,
+                Arc::new(Mutex::new(BTreeMap::new())),
             );
         });
 

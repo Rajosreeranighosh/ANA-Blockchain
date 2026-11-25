@@ -101,7 +101,11 @@ impl AnaWalletApp {
         let result = serde_json::to_vec_pretty(&self.contacts)
             .map_err(std::io::Error::other)
             .and_then(|bytes| fs::write(&temp, bytes))
-            .and_then(|_| fs::rename(&temp, &path));
+            .and_then(|_| {
+                #[cfg(windows)]
+                if path.exists() { fs::remove_file(&path)?; }
+                fs::rename(&temp, &path)
+            });
         match result {
             Ok(()) => self.message = "Address book saved locally.".into(),
             Err(error) => self.message = format!("Could not save address book: {error}"),

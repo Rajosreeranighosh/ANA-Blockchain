@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use randomx_bindings::{RandomxCache, RandomxFlags, RandomxVm};
+use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -73,10 +73,11 @@ fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
     }
 
     println!("Initializing RandomX light-mode cache (about 256 MiB)...");
-    let flags = RandomxFlags::default();
-    let cache =
-        RandomxCache::new(flags, DEV_RANDOMX_KEY).context("failed to initialize RandomX cache")?;
-    let vm = RandomxVm::new(flags, &cache).context("failed to initialize RandomX VM")?;
+    let flags = RandomXFlag::default();
+    let cache = RandomXCache::new(flags, DEV_RANDOMX_KEY)
+        .context("failed to initialize RandomX cache")?;
+    let vm = RandomXVM::new(flags, Some(cache), None)
+        .context("failed to initialize RandomX VM")?;
 
     let mut header = BlockHeader {
         height: previous.header.height + 1,
@@ -89,7 +90,10 @@ fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
 
     loop {
         let input = header_bytes(&header)?;
-        let hash = vm.hash(&input);
+        let digest = vm.calculate_hash(&input)
+            .context("RandomX hash calculation failed")?;
+        let hash: [u8; 32] = digest.try_into()
+            .map_err(|_| anyhow::anyhow!("RandomX returned an invalid digest length"))?;
         if meets_target(&hash, difficulty) {
             return Ok(Block {
                 header,

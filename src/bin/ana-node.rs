@@ -465,9 +465,9 @@ fn handle(
                     let limit = message.nonce.unwrap_or(100) as usize;
                     let tip_hash = state.tip().hash.clone();
                     if message.transaction_id.as_deref().is_some_and(|expected| expected != tip_hash) {
-                        response(&mut stream, &Message { kind: "history_stale".into(), transaction: None, block: None, blocks: None, address: None, balance: None, nonce: None, transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None, history_page: None });
+                        response(&mut stream, &Message { kind: "history_stale".into(), transaction: None, block: None, blocks: None, address: None, balance: None, nonce: None, transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None });
                     } else if let Ok(page) = build_history_page(&state.blocks, address, start_height, start_index, limit) {
-                        response(&mut stream, &Message { kind: "history_page".into(), transaction: None, block: None, blocks: None, address: None, balance: None, nonce: None, transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None, history_page: Some(page) });
+                        response(&mut stream, &Message { kind: "history_page".into(), transaction: None, block: None, blocks: None, address: None, balance: None, nonce: None, transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: Some(page) });
                     }
                 }
             }

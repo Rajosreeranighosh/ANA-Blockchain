@@ -789,7 +789,8 @@ mod tests {
     fn wallet_history_pages_are_address_filtered_and_reorg_snapshot_bound() {
         let sender = SigningKey::generate(&mut OsRng);
         let receiver = SigningKey::generate(&mut OsRng);
-        let sender_address = address(&sender.verifying_key());
+        let unrelated = SigningKey::generate(&mut OsRng);
+        let unrelated_address = address(&unrelated.verifying_key());
         let receiver_address = address(&receiver.verifying_key());
         let tx = sign(&sender, receiver_address.clone(), COIN, 7, 0).unwrap();
         let mut genesis = ChainState::new().blocks[0].clone();
@@ -809,7 +810,7 @@ mod tests {
         assert_eq!(page.entries[0].confirmations, 1);
         assert!(!page.has_more);
 
-        let empty = build_history_page(&blocks, &sender_address, 0, 0, 1).unwrap();
+        let empty = build_history_page(&blocks, &unrelated_address, 0, 0, 1).unwrap();
         assert!(empty.entries.is_empty());
         assert!(!empty.has_more);
         assert!(build_history_page(&blocks, &receiver_address, 2, 0, 1).unwrap().entries.is_empty());

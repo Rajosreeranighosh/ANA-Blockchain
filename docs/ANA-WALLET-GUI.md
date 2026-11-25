@@ -25,13 +25,14 @@ The same Cargo commands work in Windows PowerShell after installing Rust MSVC, V
 - Overview: local wallet address, balance and next nonce queried from an ANA node.
 - Send: recipient, ANA amount, fee, transaction review and explicit confirmation before signing/submitting.
 - Receive: address and QR code.
-- Transactions: lookup by transaction ID and current node-reported status.
+- Transactions: bounded, paginated confirmed-chain history for the wallet address, plus transaction-ID status lookup.
 - Settings: node endpoint and close-wallet control.
 
 ## Current limitations and security notes
 
 - This first GUI version uses the existing encrypted ANA keystore (Argon2id + XChaCha20-Poly1305). It does not implement a mnemonic seed, hardware wallet support, subaddresses, multisig, or wallet restore from a seed phrase.
-- The current node API exposes account state and transaction lookup by ID, but not a full wallet transaction-history or blockchain-scan API. The Transactions screen therefore performs ID lookup only.
+- Wallet history currently scans confirmed transparent transactions from the node's canonical chain. Pages are bounded to at most 1,000 records and pinned to a tip hash; if the tip changes during pagination, restart the scan. Pending transactions are not yet included in the history list.
+- History is transparent-account history, not private-output scanning. A future stealth wallet scanner requires key-image/output-index integration and cannot be inferred from this API.
 - Node communication is the existing plaintext TCP protocol. Use localhost, or a trusted VPN/private network with the configured peer token. Never expose the node port directly to the public internet.
 - Private transactions are not enabled in consensus. The GUI does not imply that ANA currently offers Monero-level transaction privacy.
 - This is experimental testnet software. Do not use real funds; do not treat it as audited wallet software.

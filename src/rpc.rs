@@ -13,6 +13,25 @@ const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub transaction_id: String,
+    pub direction: String,
+    pub amount: u64,
+    pub fee: u64,
+    pub height: u64,
+    pub timestamp: u64,
+    pub confirmations: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryPage {
+    pub tip_hash: String,
+    pub entries: Vec<HistoryEntry>,
+    pub next_height: u64,
+    pub next_transaction_index: usize,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeStatus {
     pub network: String,
     pub height: u64,
@@ -52,6 +71,8 @@ struct WireMessage {
     node_status: Option<NodeStatus>,
     #[serde(default)]
     auth: Option<String>,
+    #[serde(default)]
+    history_page: Option<HistoryPage>,
 }
 
 /// A client for one ANA node. If ANA_PEER_TOKEN is set, it is sent as the
@@ -102,7 +123,7 @@ impl NodeClient {
         WireMessage {
             kind: kind.into(), transaction: None, address: None, balance: None, nonce: None,
             transaction_id: None, transaction_state: None, confirmed_height: None,
-            confirmations: None, node_status: None, auth: None,
+            confirmations: None, node_status: None, auth: None, history_page: None,
         }
     }
 
@@ -152,6 +173,30 @@ impl NodeClient {
             confirmed_height: reply.confirmed_height,
             confirmations: reply.confirmations.unwrap_or(0),
         })
+    }
+
+
+    /// Fetch one bounded page of confirmed canonical-chain history. Pass the
+    /// returned tip hash and cursor to continue; a reorganization invalidates
+    /// the snapshot and requires restarting from height zero.
+    pub fn history_page(
+        &self, address: &str, start_height: u64, start_transaction_index: usize,
+        limit: usize, expected_tip: Option<&str>,
+    ) -> Result<HistoryPage> {
+        validate_address(address)?;
+        if limit == 0 || limit > 1000 { bail!("history page size must be between 1 and 1000"); }
+        let mut request = Self::empty("get_history");
+        request.address = Some(address.to_owned());
+        request.balance = Some(start_height);
+        request.confirmed_height = Some(start_transaction_index as u64);
+        request.nonce = Some(limit as u64);
+        request.transaction_id = expected_tip.map(str::to_owned);
+        let reply = self.exchange(request)?;
+        if reply.kind == "history_stale" {
+            bail!("chain changed while loading wallet history; restart the history scan");
+        }
+        if reply.kind != "history_page" { bail!("ANA node did not return wallet history"); }
+        reply.history_page.context("missing wallet history page")
     }
 
     /// Submit a signed transaction and wait for the node's explicit admission result.

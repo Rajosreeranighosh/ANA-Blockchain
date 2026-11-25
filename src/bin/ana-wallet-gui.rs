@@ -26,6 +26,12 @@ struct AnaWalletApp {
     message: String,
     qr_texture: Option<egui::TextureHandle>,
     confirm_send: bool,
+    history: Vec<ana_blockchain::rpc::HistoryEntry>,
+    history_tip_hash: Option<String>,
+    history_next_height: u64,
+    history_next_index: usize,
+    history_has_more: bool,
+    history_limit: usize,
 }
 
 impl Default for AnaWalletApp {
@@ -50,6 +56,12 @@ impl Default for AnaWalletApp {
             message: "Create a new wallet or open an encrypted ANA wallet file.".into(),
             qr_texture: None,
             confirm_send: false,
+            history: Vec::new(),
+            history_tip_hash: None,
+            history_next_height: 0,
+            history_next_index: 0,
+            history_has_more: false,
+            history_limit: 100,
         }
     }
 }
@@ -156,6 +168,43 @@ impl AnaWalletApp {
                 self.nonce = None;
             }
             Err(error) => self.message = format!("Transaction was not accepted: {error:#}"),
+        }
+    }
+
+
+    fn load_history(&mut self, reset: bool) {
+        if self.wallet.is_none() { self.message = "Open a wallet first.".into(); return; }
+        if reset {
+            self.history.clear();
+            self.history_tip_hash = None;
+            self.history_next_height = 0;
+            self.history_next_index = 0;
+            self.history_has_more = false;
+        }
+        let client = NodeClient::new(&self.node_address);
+        match client.history_page(
+            &self.address,
+            self.history_next_height,
+            self.history_next_index,
+            self.history_limit,
+            self.history_tip_hash.as_deref(),
+        ) {
+            Ok(page) => {
+                self.history_tip_hash = Some(page.tip_hash);
+                self.history_next_height = page.next_height;
+                self.history_next_index = page.next_transaction_index;
+                self.history_has_more = page.has_more;
+                self.history.extend(page.entries);
+                self.message = format!("Loaded {} confirmed wallet transaction(s).", self.history.len());
+            }
+            Err(error) => {
+                self.history.clear();
+                self.history_tip_hash = None;
+                self.history_next_height = 0;
+                self.history_next_index = 0;
+                self.history_has_more = false;
+                self.message = format!("History scan stopped; refresh from the beginning: {error:#}");
+            }
         }
     }
 
@@ -292,8 +341,27 @@ impl eframe::App for AnaWalletApp {
                         }
                     }
                     Page::Transactions => {
-                        ui.heading("Transaction lookup");
-                        ui.label("The current node API supports lookup by transaction ID, not full wallet history.");
+                        ui.heading("Transaction history");
+                        ui.label("Confirmed transactions on the current canonical chain. Refresh if the chain reorganizes.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Refresh history").clicked() { self.load_history(true); }
+                            if ui.add_enabled(self.history_has_more, egui::Button::new("Load more")).clicked() { self.load_history(false); }
+                        });
+                        ui.label(format!("{} confirmed record(s) loaded", self.history.len()));
+                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                            egui::Grid::new("ana-history-grid").striped(true).show(ui, |ui| {
+                                ui.strong("Direction"); ui.strong("Amount"); ui.strong("Height"); ui.strong("Confirmations"); ui.end_row();
+                                for entry in &self.history {
+                                    ui.label(&entry.direction);
+                                    ui.label(Self::amount_label(Some(entry.amount)));
+                                    ui.label(entry.height.to_string());
+                                    ui.label(entry.confirmations.to_string());
+                                    ui.end_row();
+                                }
+                            });
+                        });
+                        ui.separator();
+                        ui.heading("Transaction ID lookup");
                         ui.text_edit_singleline(&mut self.transaction_id);
                         if ui.button("Check transaction").clicked() { self.check_transaction(); }
                         if !self.transaction_state.is_empty() { ui.label(&self.transaction_state); }

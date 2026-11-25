@@ -786,6 +786,38 @@ mod tests {
     }
 
     #[test]
+    fn wallet_history_pages_are_address_filtered_and_reorg_snapshot_bound() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let receiver_address = address(&receiver.verifying_key());
+        let tx = sign(&sender, receiver_address.clone(), COIN, 7, 0).unwrap();
+        let mut genesis = ChainState::new().blocks[0].clone();
+        genesis.height = 0;
+        let mut block = genesis.clone();
+        block.height = 1;
+        block.timestamp = genesis.timestamp + 30;
+        block.transactions.push(tx.clone());
+        let blocks = vec![genesis, block];
+
+        let page = build_history_page(&blocks, &receiver_address, 0, 0, 1).unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].transaction_id, tx.id().unwrap());
+        assert_eq!(page.entries[0].direction, "incoming");
+        assert_eq!(page.entries[0].amount, COIN);
+        assert_eq!(page.entries[0].fee, 7);
+        assert_eq!(page.entries[0].confirmations, 1);
+        assert!(!page.has_more);
+
+        let empty = build_history_page(&blocks, &sender_address, 0, 0, 1).unwrap();
+        assert!(empty.entries.is_empty());
+        assert!(!empty.has_more);
+        assert!(build_history_page(&blocks, &receiver_address, 2, 0, 1).unwrap().entries.is_empty());
+        assert!(build_history_page(&blocks, &receiver_address, 0, 0, 0).is_err());
+        assert!(build_history_page(&blocks, &receiver_address, 0, 0, 1001).is_err());
+    }
+
+    #[test]
     fn transaction_status_reports_pending_confirmed_and_unknown() {
         let sender = SigningKey::generate(&mut OsRng);
         let receiver = SigningKey::generate(&mut OsRng);

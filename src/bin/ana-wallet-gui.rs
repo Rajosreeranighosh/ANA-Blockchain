@@ -39,6 +39,7 @@ struct AnaWalletApp {
     contacts: Vec<AddressBookEntry>,
     contact_label: String,
     contact_address: String,
+    last_activity: f64,
 }
 
 impl Default for AnaWalletApp {
@@ -72,6 +73,7 @@ impl Default for AnaWalletApp {
             contacts: Vec::new(),
             contact_label: String::new(),
             contact_address: String::new(),
+            last_activity: 0.0,
         }
     }
 }
@@ -309,6 +311,22 @@ impl AnaWalletApp {
 
 impl eframe::App for AnaWalletApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let (now, has_input) = ctx.input(|input| (input.time, !input.raw.events.is_empty()));
+        if self.last_activity == 0.0 { self.last_activity = now; }
+        if has_input { self.last_activity = now; }
+        if self.wallet.is_some() && now - self.last_activity >= 900.0 {
+            self.wallet = None;
+            self.address.clear();
+            self.balance = None;
+            self.nonce = None;
+            self.qr_texture = None;
+            self.history.clear();
+            self.history_tip_hash = None;
+            self.passphrase.zeroize();
+            self.confirm_passphrase.zeroize();
+            self.message = "Wallet automatically locked after 15 minutes of inactivity.".into();
+            self.last_activity = now;
+        }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("ANA Wallet");
@@ -475,6 +493,7 @@ impl eframe::App for AnaWalletApp {
                             self.message = "Wallet locked in this application session.".into();
                         }
                         ui.label("Encrypted with Argon2id and XChaCha20-Poly1305. Keep the passphrase separate from backups.");
+                        ui.label("The wallet automatically locks after 15 minutes without input.");
                         ui.label("Remote-node traffic is plaintext TCP. Use loopback or a trusted VPN/private network only.");
                     }
                 }

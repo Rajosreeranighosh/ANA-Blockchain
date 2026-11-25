@@ -171,6 +171,14 @@ fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
     }
 }
 
+fn transaction_ack(id: &str, state: &str) -> Message {
+    Message {
+        kind: "transaction_result".into(), transaction: None, block: None, blocks: None,
+        address: None, balance: None, nonce: None, transaction_id: Some(id.to_owned()),
+        transaction_state: Some(state.to_owned()), confirmed_height: None, node_status: None,
+    }
+}
+
 fn response(stream: &mut TcpStream, message: &Message) {
     if let Ok(mut wire) = authenticated_wire(message) {
         wire.push(b'\n');
@@ -399,17 +407,22 @@ fn handle(
         }
         "transaction" => {
             if let Some(tx) = message.transaction {
+                let id = match tx.id() { Ok(id) => id, Err(_) => return };
                 if tx.verify().is_err() {
-                    eprintln!("Rejected invalid transaction");
+                    eprintln!("Rejected invalid transaction {id}");
+                    response(&mut stream, &transaction_ack(&id, "rejected"));
                     return;
                 }
-                let id = match tx.id() { Ok(id) => id, Err(_) => return };
                 if seen.lock().map(|values| values.contains(&id)).unwrap_or(true) {
+                    response(&mut stream, &transaction_ack(&id, "already_known"));
                     return;
                 }
                 if let Ok(mut values) = pool.lock() {
                     values.insert(id.clone(), tx.clone());
-                } else { return; }
+                } else {
+                    response(&mut stream, &transaction_ack(&id, "rejected"));
+                    return;
+                }
                 let accepted = chain.lock().ok()
                     .map(|state| select_transactions(&state, &pool).iter()
                         .any(|candidate| candidate.id().ok().as_deref() == Some(&id)))
@@ -417,15 +430,17 @@ fn handle(
                 if !accepted {
                     if let Ok(mut values) = pool.lock() { values.remove(&id); }
                     eprintln!("Rejected transaction: nonce, balance, or ordering invalid");
+                    response(&mut stream, &transaction_ack(&id, "rejected"));
                     return;
                 }
                 if let Ok(mut values) = seen.lock() { values.insert(id.clone()); }
                 println!("Accepted pending transaction {id}");
                 persist_mempool_after_change(&pool, &data_file);
+                response(&mut stream, &transaction_ack(&id, "accepted"));
                 broadcast(&peers, &Message {
                     kind: "transaction".into(), transaction: Some(tx), block: None,
                     blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+                    transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                 });
             }
         }
@@ -641,6 +656,14 @@ mod network_security_tests {
         let decoded: AuthenticatedMessage = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded.message.kind, "get_chain");
         assert_eq!(decoded.auth.as_deref(), Some("test-secret"));
+    }
+
+    #[test]
+    fn transaction_ack_has_expected_wire_shape() {
+        let ack = transaction_ack("abc123", "accepted");
+        assert_eq!(ack.kind, "transaction_result");
+        assert_eq!(ack.transaction_id.as_deref(), Some("abc123"));
+        assert_eq!(ack.transaction_state.as_deref(), Some("accepted"));
     }
 
     #[test]

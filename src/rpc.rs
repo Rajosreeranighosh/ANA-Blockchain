@@ -150,19 +150,25 @@ impl NodeClient {
         })
     }
 
-    /// Submit a signed transaction. The current node wire protocol has no
-    /// submission acknowledgement; callers should query transaction_status later.
+    /// Submit a signed transaction and wait for the node's explicit admission result.
+    /// "accepted" means admitted to this node's mempool, not mined or confirmed.
     pub fn submit_transaction(&self, transaction: Transaction) -> Result<String> {
         transaction.verify()?;
         let id = transaction.id()?;
         let mut request = Self::empty("transaction");
         request.transaction = Some(transaction);
-        request.auth = self.token.clone();
-        let mut stream = self.connect()?;
-        let mut bytes = serde_json::to_vec(&request)?;
-        bytes.push(b'\n');
-        stream.write_all(&bytes)?;
-        Ok(id)
+        let reply = self.exchange(request)?;
+        if reply.kind != "transaction_result" {
+            bail!("ANA node did not acknowledge transaction submission");
+        }
+        if reply.transaction_id.as_deref() != Some(id.as_str()) {
+            bail!("ANA node acknowledgement transaction ID mismatch");
+        }
+        match reply.transaction_state.as_deref() {
+            Some("accepted") | Some("already_known") => Ok(id),
+            Some("rejected") => bail!("ANA node rejected the transaction"),
+            _ => bail!("ANA node returned an unknown transaction admission status"),
+        }
     }
 }
 

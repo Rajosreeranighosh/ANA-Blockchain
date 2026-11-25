@@ -161,3 +161,14 @@ When a wallet submits a signed transaction, the node now replies with a `transac
 - `rejected` — invalid signature, nonce, balance, or ordering, or an internal admission failure.
 
 The wallet verifies that the acknowledgement ID matches the submitted transaction and reports rejection rather than treating a successful TCP write as acceptance. Admission is not confirmation: continue using `ana-wallet tx-status` until the transaction is included in a block. Node status remains local and a later reorganization can change confirmation status.
+
+
+## Waiting for transaction confirmations
+
+The wallet can poll a node until a transaction reaches a requested confirmation count or a timeout expires:
+
+```sh
+cargo run --release --bin ana-wallet -- wait-confirmations <transaction-id> 127.0.0.1:19001 6 600
+```
+
+The example waits for 6 confirmations for up to 600 seconds, checking every 5 seconds. The command reports the node's current local status and fails on timeout; it does not cancel or reverse the transaction. A reorganization can reduce the confirmation count, so reaching a threshold is not deterministic finality. Use a trusted node and the same `ANA_PEER_TOKEN` configuration as other wallet RPC commands.

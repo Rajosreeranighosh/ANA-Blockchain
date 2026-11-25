@@ -84,3 +84,17 @@ For nodes communicating across machines, set the same high-entropy `ANA_PEER_TOK
 New wallets created by `ana-wallet new` are encrypted at rest with Argon2id key derivation and XChaCha20-Poly1305 authenticated encryption. The CLI prompts for the passphrase without echoing it; passphrases must be at least 12 characters. The wallet file is written atomically and restricted to owner read/write permissions on Unix. The passphrase is never stored in the file or accepted as a command-line argument.
 
 **Back up the encrypted wallet file and store the passphrase separately.** Losing either means losing access; there is no password reset or recovery service. Anyone who obtains both can spend the wallet. Keep backups offline and never upload wallet files or passphrases to GitHub. Existing plaintext wallet files from earlier versions are not automatically imported by this CLI; preserve them securely until a separately reviewed migration tool exists. This is experimental software, not audited custody software.
+
+
+## Legacy wallet migration and encrypted backup
+To migrate a pre-v1 plaintext wallet without changing its address or private key:
+```sh
+cargo run --release --bin ana-wallet -- migrate old-wallet.json new-wallet.encrypted.json
+```
+The command prompts twice for a new passphrase, refuses to overwrite the destination, and leaves the original wallet untouched. Verify the new wallet address and backup before securely removing any plaintext copy.
+
+To create and verify a copy of an encrypted wallet:
+```sh
+cargo run --release --bin ana-wallet -- backup wallet.encrypted.json wallet-backup.encrypted.json
+```
+The backup command first unlocks the source, refuses to overwrite an existing destination, writes an owner-only file on Unix, then verifies that the copied keystore can be unlocked. Store the passphrase separately from both wallet copies. Keep at least two backups in separate secure locations. Never commit wallet files or passphrases to source control. A forgotten passphrase cannot be reset.

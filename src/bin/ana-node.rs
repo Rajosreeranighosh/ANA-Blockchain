@@ -671,11 +671,16 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
 
+    // Thread names contain ':' on Rust's Windows test runner, which is not
+    // valid in Windows filenames. A process-local counter also keeps parallel
+    // tests from colliding when they use the same label.
+    static TEMP_FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
     fn temp_file(label: &str) -> PathBuf {
+        let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "ana-{label}-{}-{}.json",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "ana-{label}-{}-{sequence}.json",
+            std::process::id()
         ))
     }
 

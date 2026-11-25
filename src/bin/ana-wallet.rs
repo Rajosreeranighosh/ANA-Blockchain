@@ -88,7 +88,13 @@ fn main() -> Result<()> {
             let status = NodeClient::new(&args[3]).transaction_status(&args[2])?;
             println!("Transaction: {}", status.transaction_id);
             println!("Status: {}", status.state);
-            if let Some(height) = status.confirmed_height { println!("Confirmed at block: {height}"); }
+            if let Some(height) = status.confirmed_height {
+                println!("Confirmed at block: {height}");
+                println!("Confirmations: {}", status.confirmations);
+                println!("Confirmations count the inclusion block as 1; a reorganization can reduce this to zero.");
+            } else if status.state == "pending" {
+                println!("Confirmations: 0 (still pending in this node mempool)");
+            }
         }
         _ => println!("ANA wallet: new [file] | migrate <legacy-file> <encrypted-file> | backup <wallet-file> <backup-file> | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node> | status <node> | tx-status <transaction-id> <node>"),
     }

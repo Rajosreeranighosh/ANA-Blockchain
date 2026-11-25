@@ -26,6 +26,7 @@ pub struct TransactionStatus {
     pub transaction_id: String,
     pub state: String,
     pub confirmed_height: Option<u64>,
+    pub confirmations: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,6 +46,8 @@ struct WireMessage {
     transaction_state: Option<String>,
     #[serde(default)]
     confirmed_height: Option<u64>,
+    #[serde(default)]
+    confirmations: Option<u64>,
     #[serde(default)]
     node_status: Option<NodeStatus>,
     #[serde(default)]
@@ -99,7 +102,7 @@ impl NodeClient {
         WireMessage {
             kind: kind.into(), transaction: None, address: None, balance: None, nonce: None,
             transaction_id: None, transaction_state: None, confirmed_height: None,
-            node_status: None, auth: None,
+            confirmations: None, node_status: None, auth: None,
         }
     }
 
@@ -147,6 +150,7 @@ impl NodeClient {
             transaction_id: id.to_ascii_lowercase(),
             state,
             confirmed_height: reply.confirmed_height,
+            confirmations: reply.confirmations.unwrap_or(0),
         })
     }
 
@@ -192,6 +196,7 @@ mod tests {
         let reply: WireMessage = serde_json::from_str(message).unwrap();
         assert_eq!(reply.transaction_state.as_deref(), Some("confirmed"));
         assert_eq!(reply.confirmed_height, Some(12));
+        assert_eq!(reply.confirmations, None); // Older nodes remain deserializable.
     }
 
     #[test]

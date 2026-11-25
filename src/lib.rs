@@ -277,23 +277,83 @@ mod tests {
         assert!(t.verify().is_err());
     }
 
-    #[test]
-    fn issuance_is_capped() {
-        let mut l = Ledger::default();
-        l.minted = MAX_SUPPLY - 1;
-        let k = SigningKey::generate(&mut OsRng);
-        let b = Block {
-            height: 1,
+    fn empty_block(miner: &SigningKey, height: u64) -> Block {
+        Block {
+            height,
             previous: String::new(),
-            timestamp: 1,
-            miner: address(&k.verifying_key()),
+            timestamp: height,
+            miner: address(&miner.verifying_key()),
             transactions: vec![],
             nonce: 0,
             difficulty: TESTNET_DIFFICULTY,
             hash: String::new(),
-        };
-        l.apply_block(&b).unwrap();
-        assert_eq!(l.minted, MAX_SUPPLY);
+        }
+    }
+
+    #[test]
+    fn first_block_mints_exactly_50_ana_to_miner() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let miner_address = address(&miner.verifying_key());
+        let mut ledger = Ledger::default();
+
+        ledger.apply_block(&empty_block(&miner, 1)).unwrap();
+
+        assert_eq!(ledger.minted, BLOCK_REWARD);
+        assert_eq!(ledger.balance(&miner_address), BLOCK_REWARD);
+        assert_eq!(ledger.minted, 50 * COIN);
+    }
+
+    #[test]
+    fn each_block_mints_subsidy_once_and_only_once() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let miner_address = address(&miner.verifying_key());
+        let mut ledger = Ledger::default();
+
+        ledger.apply_block(&empty_block(&miner, 1)).unwrap();
+        ledger.apply_block(&empty_block(&miner, 2)).unwrap();
+
+        assert_eq!(ledger.minted, 2 * BLOCK_REWARD);
+        assert_eq!(ledger.balance(&miner_address), 2 * BLOCK_REWARD);
+    }
+
+    #[test]
+    fn transaction_fees_go_to_miner_without_increasing_minted_supply() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let miner = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let receiver_address = address(&receiver.verifying_key());
+        let miner_address = address(&miner.verifying_key());
+        let amount = 2 * COIN;
+        let fee = COIN / 10;
+        let mut ledger = Ledger::default();
+        ledger.balances.insert(sender_address.clone(), 5 * COIN);
+        let tx = sign(&sender, receiver_address.clone(), amount, fee, 0).unwrap();
+        let mut block = empty_block(&miner, 1);
+        block.transactions.push(tx);
+
+        ledger.apply_block(&block).unwrap();
+
+        assert_eq!(ledger.balance(&receiver_address), amount);
+        assert_eq!(ledger.balance(&sender_address), 5 * COIN - amount - fee);
+        assert_eq!(ledger.balance(&miner_address), BLOCK_REWARD + fee);
+        assert_eq!(ledger.minted, BLOCK_REWARD);
+    }
+
+    #[test]
+    fn issuance_stops_exactly_at_supply_cap() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let miner_address = address(&miner.verifying_key());
+        let mut ledger = Ledger::default();
+        ledger.minted = MAX_SUPPLY - 1;
+
+        ledger.apply_block(&empty_block(&miner, 1)).unwrap();
+        assert_eq!(ledger.minted, MAX_SUPPLY);
+        assert_eq!(ledger.balance(&miner_address), 1);
+
+        ledger.apply_block(&empty_block(&miner, 2)).unwrap();
+        assert_eq!(ledger.minted, MAX_SUPPLY);
+        assert_eq!(ledger.balance(&miner_address), 1);
     }
 
     #[test]

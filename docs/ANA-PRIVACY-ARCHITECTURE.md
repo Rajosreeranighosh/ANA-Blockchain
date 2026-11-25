@@ -61,9 +61,10 @@ The current Ed25519 account wallet is not a substitute for this design.
 
 ## Implementation sequence
 
-1. Freeze this versioned data model and add serialization/structural tests.
-2. Select and independently review a maintained curve/cryptography stack.
-3. Implement stealth-address derivation and wallet scanning.
+1. Freeze this versioned data model and add serialization/structural tests (done).
+2. Add experimental two-key spend/view addresses, one-time output derivation,
+   view tags, and wallet-side output scanning (prototype implemented; not audited).
+3. Independently review the curve/cryptography stack and derivation transcript.
 4. Implement commitments, authenticated amount encryption, and range proofs.
 5. Implement CLSAG-compatible signing and verification plus key-image checks.
 6. Add a separate privacy UTXO/key-image state and reorg-safe persistence.
@@ -82,3 +83,15 @@ The current Ed25519 account wallet is not a substitute for this design.
 Do not copy Monero's code without reviewing its license and dependency
 requirements. Do not invent cryptographic primitives or treat placeholder
 bytes as proofs.
+
+
+## Current stealth-wallet prototype limitations
+
+The current experimental address uses separate Edwards spend/view public keys,
+with a sender ephemeral scalar, shared Edwards point, domain-separated SHA-512
+scalar derivation, one-time destination key, and one-byte view tag. The wallet
+can scan a candidate output and recover the corresponding one-time scalar.
+This is a prototype protocol design, not Monero wire-compatible and not
+independently audited. It does not encrypt amounts, construct commitments,
+verify range proofs, produce CLSAG signatures, or provide a secure persistent
+privacy-wallet keystore. Do not use it for real funds.

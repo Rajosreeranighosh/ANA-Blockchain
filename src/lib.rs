@@ -772,7 +772,7 @@ pub fn create_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<String>
         version: 1, network: NETWORK.into(), kdf: "argon2id-19m-2-1".into(),
         salt: hex::encode(salt), nonce: hex::encode(nonce), ciphertext: hex::encode(ciphertext),
     };
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) { fs::create_dir_all(parent)?; }
     let temp = path.with_extension("wallet-tmp");
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -806,8 +806,38 @@ pub fn open_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<SigningKe
         cipher.decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
             .map_err(|_| anyhow::anyhow!("wrong passphrase or damaged wallet"))?
     );
-    let secret: [u8; 32] = plaintext.as_slice().try_into()
-        .map_err(|_| anyhow::anyhow!("invalid decrypted private key"))?;
+    use zeroize::Zeroize;
+    let secret = zeroize::Zeroizing::new(<[u8; 32]>::try_from(plaintext.as_slice())
+        .map_err(|_| anyhow::anyhow!("invalid decrypted private key"))?);
     plaintext.zeroize();
     Ok(SigningKey::from_bytes(&secret))
+}
+
+
+#[cfg(test)]
+mod encrypted_wallet_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn encrypted_wallet_round_trip_and_rejects_wrong_passphrase() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        let expected = create_encrypted_wallet(&path, b"correct horse battery").unwrap();
+        let key = open_encrypted_wallet(&path, b"correct horse battery").unwrap();
+        assert_eq!(address(&key.verifying_key()), expected);
+        assert!(open_encrypted_wallet(&path, b"incorrect passphrase").is_err());
+        let contents = fs::read_to_string(path).unwrap();
+        assert!(!contents.contains("correct horse"));
+        assert!(!contents.contains("secret_key"));
+    }
+
+    #[test]
+    fn encrypted_wallet_refuses_short_passphrase_and_overwrite() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("wallet.json");
+        assert!(create_encrypted_wallet(&path, b"short").is_err());
+        create_encrypted_wallet(&path, b"a sufficiently long passphrase").unwrap();
+        assert!(create_encrypted_wallet(&path, b"another sufficiently long passphrase").is_err());
+    }
 }

@@ -87,14 +87,14 @@ impl PrivacyTransactionV1 {
             if input.ring.len() != PRIVACY_RING_SIZE {
                 bail!("privacy input has an invalid ring size");
             }
-            if input.key_image.iter().all(|byte| *byte == 0)
-                || !key_images.insert(input.key_image)
-            {
-                bail!("privacy input has a zero or duplicate key image");
+            validate_compressed_point(&input.key_image, "key image")?;
+            if !key_images.insert(input.key_image) {
+                bail!("privacy input has a duplicate key image");
             }
-            if input.pseudo_output_commitment.iter().all(|byte| *byte == 0) {
-                bail!("privacy input has an empty pseudo-output commitment");
-            }
+            validate_compressed_point(
+                &input.pseudo_output_commitment,
+                "pseudo-output commitment",
+            )?;
             if input.clsag_signature.is_empty()
                 || input.clsag_signature.len() > MAX_CLSAG_BYTES
             {
@@ -110,11 +110,9 @@ impl PrivacyTransactionV1 {
         }
 
         for output in &self.outputs {
-            if output.stealth.one_time_key.iter().all(|byte| *byte == 0)
-                || output.commitment.iter().all(|byte| *byte == 0)
-            {
-                bail!("privacy output has an empty key or commitment");
-            }
+            validate_compressed_point(&output.stealth.one_time_key, "one-time output key")?;
+            validate_compressed_point(&output.stealth.tx_public_key, "transaction public key")?;
+            validate_compressed_point(&output.commitment, "output commitment")?;
         }
         Ok(())
     }
@@ -134,11 +132,8 @@ impl PrivacyAddressV1 {
         if self.network != expected_network || self.network.contains(':') {
             bail!("privacy address belongs to another network or has invalid network text");
         }
-        for encoded in [&self.spend_public, &self.view_public] {
-            let point = CompressedEdwardsY(*encoded).decompress()
-                .ok_or_else(|| anyhow::anyhow!("privacy address contains an invalid public key"))?;
-            if point.is_identity() { bail!("privacy address contains the identity point"); }
-        }
+        validate_compressed_point(&self.spend_public, "address spend public key")?;
+        validate_compressed_point(&self.view_public, "address view public key")?;
         Ok(())
     }
 
@@ -255,11 +250,24 @@ fn random_scalar() -> Scalar {
     }
 }
 
-fn decompress_point(encoded: &[u8; 32]) -> Result<EdwardsPoint> {
-    let point = CompressedEdwardsY(*encoded).decompress()
-        .ok_or_else(|| anyhow::anyhow!("invalid Edwards public point"))?;
-    if point.is_identity() { bail!("identity Edwards point is not allowed"); }
+/// Decode a canonical, non-identity point in the prime-order Edwards subgroup.
+/// This is an encoding check only; it does not verify a signature or proof.
+fn validate_compressed_point(encoded: &[u8; 32], field: &str) -> Result<EdwardsPoint> {
+    let compressed = CompressedEdwardsY(*encoded);
+    let point = compressed
+        .decompress()
+        .ok_or_else(|| anyhow::anyhow!("invalid Edwards point encoding for {field}"))?;
+    if point.compress().to_bytes() != *encoded {
+        bail!("non-canonical Edwards point encoding for {field}");
+    }
+    if point.is_identity() || !point.is_torsion_free() {
+        bail!("identity or non-prime-subgroup Edwards point for {field}");
+    }
     Ok(point)
+}
+
+fn decompress_point(encoded: &[u8; 32]) -> Result<EdwardsPoint> {
+    validate_compressed_point(encoded, "wallet public point")
 }
 
 fn output_derivation(shared: &EdwardsPoint, output_index: u64) -> Scalar {
@@ -284,7 +292,7 @@ fn view_tag(shared: &EdwardsPoint, output_index: u64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use curve25519_dalek::traits::Identity;
 
     #[test]
     fn stealth_output_is_discovered_only_by_matching_wallet() {
@@ -315,6 +323,7 @@ mod tests {
     }
 
     fn structurally_valid_transaction() -> PrivacyTransactionV1 {
+        let valid_point = ED25519_BASEPOINT_POINT.compress().to_bytes();
         PrivacyTransactionV1 {
             version: PRIVACY_TX_VERSION,
             network: "ANA-TESTNET-1".into(),
@@ -322,13 +331,13 @@ mod tests {
                 ring: (0..PRIVACY_RING_SIZE as u64)
                     .map(|global_index| OutputReference { global_index })
                     .collect(),
-                key_image: [1; 32],
-                pseudo_output_commitment: [2; 32],
+                key_image: valid_point,
+                pseudo_output_commitment: valid_point,
                 clsag_signature: vec![3; 64],
             }],
             outputs: vec![PrivacyOutputV1 {
-                stealth: StealthOutputV1 { one_time_key: [4; 32], tx_public_key: [9; 32], view_tag: 7 },
-                commitment: [5; 32],
+                stealth: StealthOutputV1 { one_time_key: valid_point, tx_public_key: valid_point, view_tag: 7 },
+                commitment: valid_point,
                 encrypted_amount: [6; 24],
             }],
             fee: 100,
@@ -369,6 +378,25 @@ mod tests {
         let mut second = tx.inputs[0].clone();
         second.ring.iter_mut().for_each(|member| member.global_index += 100);
         tx.inputs.push(second);
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn point_encoding_rejects_identity_noncanonical_and_invalid_points() {
+        let identity = EdwardsPoint::identity().compress().to_bytes();
+        assert!(validate_compressed_point(&identity, "test").is_err());
+        assert!(validate_compressed_point(&[0xff; 32], "test").is_err());
+        let basepoint = ED25519_BASEPOINT_POINT.compress().to_bytes();
+        assert!(validate_compressed_point(&basepoint, "test").is_ok());
+    }
+
+    #[test]
+    fn privacy_v1_rejects_invalid_curve_point_fields() {
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].key_image = [0xff; 32];
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].stealth.tx_public_key = EdwardsPoint::identity().compress().to_bytes();
         assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
     }
 

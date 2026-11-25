@@ -22,6 +22,7 @@ cargo build --release
 ```sh
 cargo run --release --bin ana-wallet -- new miner.json
 cargo run --release --bin ana-wallet -- address miner.json
+cargo run --release --bin ana-wallet -- balance <ANA-address> 127.0.0.1:19001
 ```
 
 ## Run two local nodes
@@ -36,11 +37,11 @@ cargo run --release --bin ana-node -- 127.0.0.1:19002 node-b.json none 127.0.0.1
 The nodes request the peer chain at startup, validate received blocks, persist accepted state, and gossip new blocks. The first node mines; the second is an observer (`none`) to avoid two local miners creating competing tips. Configure peers in both directions for resilient propagation.
 
 ## Current testnet-alpha limitations
-- Nodes currently mine empty blocks. Transaction relay exists, but transactions are not yet assembled into blocks or confirmed.
+- Nodes maintain an in-memory transaction mempool, validate sender signatures/nonces/balances, include eligible pending transactions in mined blocks, and update balances/nonces when blocks are accepted. Pending transactions are removed after confirmation. The mempool is not persisted across restarts.
 - Chain selection is append-only: no fork choice, reorganization, cumulative-work comparison, or robust adversarial sync.
 - Difficulty is fixed at 8 bits and is only suitable for local experimentation.
 - RandomX uses one fixed testnet seed; no epoch seed schedule exists.
 - The node protocol has no authentication, rate limits, peer discovery, message size limits, or DoS protection.
 - The JSON-based consensus header encoding is deterministic for this Rust struct today but is not yet a formally versioned canonical wire format.
-- Wallet send still uses nonce 0; balance/nonce RPC and encrypted keystore are not implemented.
+- Wallet can query available balance and next nonce from a node before sending. The keystore is still unencrypted, and the mempool is not persisted.
 - Do not use for real funds. This is not mainnet-ready software.

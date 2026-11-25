@@ -447,7 +447,21 @@ impl ChainState {
     }
 
     pub fn mine_next(&self, miner: String) -> Result<Block> {
+        self.mine_next_with_transactions(miner, Vec::new())
+    }
+
+    /// Mine a block containing the supplied transactions. Transactions are
+    /// consensus-checked again by append() before the block is committed.
+    pub fn mine_next_with_transactions(
+        &self,
+        miner: String,
+        transactions: Vec<Transaction>,
+    ) -> Result<Block> {
         validate_address(&miner)?;
+        let mut projected = self.ledger.clone();
+        for transaction in &transactions {
+            projected.apply_transaction(transaction)?;
+        }
         let previous = self.tip();
         let height = previous.height.checked_add(1).context("height overflow")?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
@@ -457,7 +471,7 @@ impl ChainState {
             previous: previous.hash.clone(),
             timestamp,
             miner,
-            transactions: Vec::new(),
+            transactions,
             nonce: 0,
             difficulty: TESTNET_DIFFICULTY,
             hash: String::new(),

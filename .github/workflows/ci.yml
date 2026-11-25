@@ -17,4 +17,6 @@ jobs:
       - name: Format Rust sources
         run: cargo fmt --all
       - name: Compile and test all targets
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: '3.5'
         run: cargo test --all-targets

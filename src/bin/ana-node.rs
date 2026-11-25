@@ -38,8 +38,14 @@ struct Message {
     confirmations: Option<u64>,
     #[serde(default)]
     node_status: Option<NodeStatus>,
+    #[serde(default)]
+    history_page: Option<HistoryPage>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct HistoryEntry { transaction_id: String, direction: String, amount: u64, fee: u64, height: u64, timestamp: u64, confirmations: u64 }
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct HistoryPage { tip_hash: String, entries: Vec<HistoryEntry>, next_height: u64, next_transaction_index: usize, has_more: bool }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct NodeStatus {
     network: String,
@@ -112,7 +118,7 @@ fn chain_request(start: u64, sync_id: Option<String>) -> Message {
     Message { kind: "get_chain".into(), transaction: None, block: None, blocks: None,
         address: Some(start.to_string()), balance: None, nonce: Some(MAX_BLOCKS_PER_PAGE as u64),
         transaction_id: sync_id, transaction_state: None, confirmed_height: None,
-        confirmations: None, node_status: None }
+        confirmations: None, node_status: None, history_page: None }
 }
 
 const MAX_CONNECTIONS: usize = 64;
@@ -167,7 +173,7 @@ fn authenticated_wire(message: &Message) -> Result<Vec<u8>> {
             transaction_state: message.transaction_state.clone(),
             confirmed_height: message.confirmed_height,
             confirmations: message.confirmations,
-            node_status: message.node_status.clone(),
+            node_status: message.node_status.clone(), history_page: message.history_page.clone(),
         },
         auth: peer_token(),
     })?)
@@ -261,7 +267,7 @@ fn transaction_ack(id: &str, state: &str) -> Message {
     Message {
         kind: "transaction_result".into(), transaction: None, block: None, blocks: None,
         address: None, balance: None, nonce: None, transaction_id: Some(id.to_owned()),
-        transaction_state: Some(state.to_owned()), confirmed_height: None, confirmations: None, node_status: None,
+        transaction_state: Some(state.to_owned()), confirmed_height: None, confirmations: None, node_status: None, history_page: None,
     }
 }
 
@@ -331,6 +337,30 @@ fn confirmation_count(tip_height: u64, confirmed_height: u64) -> Option<u64> {
     tip_height.checked_sub(confirmed_height)?.checked_add(1)
 }
 
+
+fn build_history_page(blocks: &[Block], address: &str, start_height: u64, start_index: usize, limit: usize) -> Result<HistoryPage> {
+    validate_address(address)?;
+    if limit == 0 || limit > 1000 { bail!("history page size must be between 1 and 1000"); }
+    let tip = blocks.last().context("chain has no genesis block")?;
+    if start_height > tip.height.saturating_add(1) { bail!("history cursor is beyond the current chain tip"); }
+    let mut entries = Vec::new();
+    for height in start_height..=tip.height {
+        let block = blocks.get(height as usize).context("chain height index is inconsistent")?;
+        let first = if height == start_height { start_index } else { 0 };
+        if first > block.transactions.len() { bail!("history transaction cursor is outside the block"); }
+        for (index, tx) in block.transactions.iter().enumerate().skip(first) {
+            if tx.from != address && tx.to != address { continue; }
+            let direction = if tx.from == address && tx.to == address { "self" } else if tx.from == address { "outgoing" } else { "incoming" };
+            entries.push(HistoryEntry { transaction_id: tx.id()?, direction: direction.into(), amount: tx.amount, fee: tx.fee, height, timestamp: block.timestamp, confirmations: tip.height.saturating_sub(height).saturating_add(1) });
+            if entries.len() == limit {
+                let next_index = index.saturating_add(1);
+                let within = next_index < block.transactions.len();
+                return Ok(HistoryPage { tip_hash: tip.hash.clone(), entries, next_height: if within { height } else { height.saturating_add(1) }, next_transaction_index: if within { next_index } else { 0 }, has_more: within || height < tip.height });
+            }
+        }
+    }
+    Ok(HistoryPage { tip_hash: tip.hash.clone(), entries, next_height: tip.height.saturating_add(1), next_transaction_index: 0, has_more: false })
+}
 fn handle(
     mut stream: TcpStream,
     chain: SharedChain,
@@ -385,7 +415,7 @@ fn handle(
                         blocks: Some(state.blocks[start..end].to_vec()), address: Some(start.to_string()),
                         balance: None, nonce: Some(end as u64), transaction_id: Some(tip_hash.clone()),
                         transaction_state: None, confirmed_height: None,
-                        confirmations: Some(u64::from(end < state.blocks.len())), node_status: None };
+                        confirmations: Some(u64::from(end < state.blocks.len())), node_status: None, history_page: None };
                     if authenticated_wire(&reply).map(|bytes| bytes.len() < MAX_MESSAGE_BYTES as usize).unwrap_or(false) {
                         response(&mut stream, &reply); break;
                     }
@@ -403,7 +433,7 @@ fn handle(
                             address: Some(address.clone()), balance: Some(ledger.balance(&address)),
                             nonce: Some(ledger.nonce(&address)),
                             transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None,
-                            node_status: None,
+                            node_status: None, history_page: None,
                         });
                     }
                 }
@@ -423,7 +453,23 @@ fn handle(
                         minted: state.ledger.minted,
                         pending_transactions: pending.len(),
                     }),
+                    history_page: None,
                 });
+            }
+        }
+        "get_history" => {
+            if let Some(address) = message.address.as_deref() {
+                if let Ok(state) = chain.lock() {
+                    let start_height = message.balance.unwrap_or(0);
+                    let start_index = message.confirmed_height.unwrap_or(0) as usize;
+                    let limit = message.nonce.unwrap_or(100) as usize;
+                    let tip_hash = state.tip().hash.clone();
+                    if message.transaction_id.as_deref().is_some_and(|expected| expected != tip_hash) {
+                        response(&mut stream, &Message { kind: "history_stale".into(), transaction: None, block: None, blocks: None, address: None, balance: None, nonce: None, transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None, history_page: None });
+                    } else if let Ok(page) = build_history_page(&state.blocks, address, start_height, start_index, limit) {
+                        response(&mut stream, &Message { kind: "history_page".into(), transaction: None, block: None, blocks: None, address: None, balance: None, nonce: None, transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None, history_page: Some(page) });
+                    }
+                }
             }
         }
         "get_transaction" => {
@@ -435,7 +481,7 @@ fn handle(
                         kind: "transaction_status".into(), transaction: None, block: None, blocks: None,
                         address: None, balance: None, nonce: None,
                         transaction_id: Some(id), transaction_state: Some(status),
-                        confirmed_height: height, confirmations, node_status: None,
+                        confirmed_height: height, confirmations, node_status: None, history_page: None,
                     });
                 }
             }
@@ -503,7 +549,7 @@ fn handle(
                     broadcast(&peers, &Message {
                         kind: "block".into(), transaction: None, block: Some(block),
                         blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None,
                     });
                 } else {
                     eprintln!("Block does not extend local tip; requesting peer chain");
@@ -546,7 +592,7 @@ fn handle(
                 broadcast(&peers, &Message {
                     kind: "transaction".into(), transaction: Some(tx), block: None,
                     blocks: None, address: None, balance: None, nonce: None,
-                    transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
+                    transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None,
                 });
             }
         }
@@ -623,7 +669,7 @@ fn main() -> Result<()> {
                         broadcast(&mining_peers, &Message {
                             kind: "block".into(), transaction: None, block: Some(block),
                             blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None,
                         });
                     }
                 }
@@ -822,7 +868,7 @@ mod network_security_tests {
             address: None,
             balance: None,
             nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None, history_page: None,
         };
         let envelope = AuthenticatedMessage {
             message,
@@ -874,7 +920,7 @@ mod network_security_tests {
             transaction: None, block: None, blocks: None, address: None,
             balance: None, nonce: None, transaction_id: None,
             transaction_state: None, confirmed_height: None, confirmations: None,
-            node_status: None,
+            node_status: None, history_page: None,
         };
         let mut wire = authenticated_wire(&request).unwrap();
         wire.push(b'\n');
@@ -969,7 +1015,7 @@ mod network_security_tests {
             transaction_state: None,
             confirmed_height: None,
             confirmations: None,
-            node_status: None,
+            node_status: None, history_page: None,
         };
         let mut wire = authenticated_wire(&request).unwrap();
         wire.push(b'\n');
@@ -1041,7 +1087,7 @@ mod network_security_tests {
             transaction_state: None,
             confirmed_height: None,
             confirmations: None,
-            node_status: None,
+            node_status: None, history_page: None,
         };
         let mut wire = authenticated_wire(&request).unwrap();
         wire.push(b'\n');

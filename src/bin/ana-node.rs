@@ -69,7 +69,7 @@ fn persist_mempool(pool: &Mempool, path: &Path) -> Result<()> {
     let snapshot = pool.lock()
         .map_err(|_| anyhow::anyhow!("mempool lock poisoned"))?
         .clone();
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     let temp = path.with_extension("tmp");
@@ -86,7 +86,7 @@ fn load_mempool(path: &Path, chain: &ChainState) -> Result<BTreeMap<String, Tran
     let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&fs::read(path)?)?;
     let mut candidates = BTreeMap::new();
     for (id, tx) in stored {
-        if tx.verify().is_ok() && tx.id().as_deref() == Ok(id.as_str()) {
+        if tx.verify().is_ok() && matches!(tx.id(), Ok(ref actual_id) if actual_id == &id) {
             candidates.insert(id, tx);
         }
     }
@@ -391,4 +391,63 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+ 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ana_blockchain::{address, sign, COIN};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn temp_file(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ana-{label}-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ))
+    }
+
+    #[test]
+    fn pending_transactions_survive_restart_and_are_revalidated() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let mut chain = ChainState::new();
+        chain.ledger.balances.insert(sender_address, 5 * COIN);
+        let tx = sign(&sender, address(&receiver.verifying_key()), COIN, 1, 0).unwrap();
+        let id = tx.id().unwrap();
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::from([(id.clone(), tx)])));
+        let path = temp_file("mempool-roundtrip");
+
+        persist_mempool(&pool, &path).unwrap();
+        let restored = load_mempool(&path, &chain).unwrap();
+
+        assert!(restored.contains_key(&id));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restart_discards_invalid_or_unexecutable_pending_transactions() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let tx = sign(
+            &sender,
+            address(&receiver.verifying_key()),
+            COIN,
+            1,
+            0,
+        ).unwrap();
+        let mut invalid = tx;
+        invalid.amount += 1;
+        let id = invalid.id().unwrap();
+        let stored = BTreeMap::from([(id, invalid)]);
+        let path = temp_file("mempool-invalid");
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let restored = load_mempool(&path, &ChainState::new()).unwrap();
+
+        assert!(restored.is_empty());
+        fs::remove_file(path).unwrap();
+    }
 }

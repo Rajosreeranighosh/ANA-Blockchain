@@ -2,3 +2,9 @@
 *.db
 *.log
 .env
+ana-wallet.json
+miner.json
+node-a.json
+node-b.json
+*.wallet-tmp
+*.mempool.json

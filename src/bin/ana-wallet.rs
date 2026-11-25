@@ -1,9 +1,9 @@
-use ana_blockchain::{address, open_encrypted_wallet, parse_amount, sign, Transaction};
+use ana_blockchain::{address, encrypt_wallet_key, open_encrypted_wallet, open_wallet, parse_amount, sign, Transaction};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
-    io::{BufRead, BufReader, Write},
+    fs,\n    io::{BufRead, BufReader, Write},
     net::TcpStream,
     path::Path,
 };
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
             println!("New ANA address: {addr}");
             println!("Wallet encrypted. Back up this file and keep the passphrase separately.");
         }
-        Some("address") => {
+        Some("migrate") => {\n            if args.len() != 4 { bail!("Usage: ana-wallet migrate <legacy-plaintext-wallet> <new-encrypted-wallet>"); }\n            let legacy = open_wallet(Path::new(&args[2])).context("could not open legacy wallet")?;\n            let pass = rpassword::prompt_password("New wallet passphrase (12+ characters): ")?;\n            let confirm = rpassword::prompt_password("Confirm passphrase: ")?;\n            if pass != confirm { bail!("passphrases do not match"); }\n            encrypt_wallet_key(Path::new(&args[3]), &legacy, pass.as_bytes())?;\n            println!("Migrated address: {}", address(&legacy.verifying_key()));\n            println!("The original plaintext wallet was not changed. Securely archive it, then remove it only after verifying your backup.");\n        }\n        Some("backup") => {\n            if args.len() != 4 { bail!("Usage: ana-wallet backup <encrypted-wallet> <backup-file>"); }\n            let pass = rpassword::prompt_password("Wallet passphrase: ")?;\n            open_encrypted_wallet(Path::new(&args[2]), pass.as_bytes()).context("wallet unlock failed; backup not created")?;\n            let source = Path::new(&args[2]);\n            let destination = Path::new(&args[3]);\n            if destination.exists() { bail!("refusing to overwrite backup"); }\n            let bytes = fs::read(source)?;\n            let temp = destination.with_extension("backup-tmp");\n            let mut options = fs::OpenOptions::new();\n            options.write(true).create_new(true);\n            let mut out = options.open(&temp)?;\n            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?; }\n            out.write_all(&bytes)?;\n            out.sync_all()?;\n            fs::rename(&temp, destination)?;\n            open_encrypted_wallet(destination, pass.as_bytes()).context("backup verification failed")?;\n            println!("Encrypted backup created and verified. Store the passphrase separately.");\n        }\n        Some("address") => {
             let path = args.get(2).map(String::as_str).unwrap_or("ana-wallet.json");
             println!("{}", address(&unlock(path)?.verifying_key()));
         }
@@ -84,7 +84,7 @@ fn main() -> Result<()> {
             println!("Submitted transaction: {id}");
             println!("The node will relay it; it is not confirmed until included in a mined block.");
         }
-        _ => println!("ANA wallet: new [file] | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node>"),
+        _ => println!("ANA wallet: new [file] | migrate <legacy-file> <encrypted-file> | backup <wallet-file> <backup-file> | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node>"),
     }
     Ok(())
 }

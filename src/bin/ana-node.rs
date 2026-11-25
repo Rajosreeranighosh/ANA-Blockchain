@@ -8,7 +8,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -35,15 +35,52 @@ type Peers = Arc<Vec<String>>;
 type Seen = Arc<Mutex<HashSet<String>>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
 
+const MAX_CONNECTIONS: usize = 64;
+const MAX_MESSAGE_BYTES: u64 = 1024 * 1024;
+const SOCKET_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Serialize, Deserialize)]
+struct AuthenticatedMessage {
+    #[serde(flatten)]
+    message: Message,
+    #[serde(default)]
+    auth: Option<String>,
+}
+
+fn peer_token() -> Option<String> {
+    env::var("ANA_PEER_TOKEN").ok().filter(|token| !token.is_empty())
+}
+
+fn authenticated_wire(message: &Message) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&AuthenticatedMessage {
+        message: Message {
+            kind: message.kind.clone(),
+            transaction: message.transaction.clone(),
+            block: message.block.clone(),
+            blocks: message.blocks.clone(),
+            address: message.address.clone(),
+            balance: message.balance,
+            nonce: message.nonce,
+        },
+        auth: peer_token(),
+    })?)
+}
+
+struct ConnectionGuard(Arc<AtomicUsize>);
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); }
+}
+
+
 fn send(peer: &str, message: &Message) {
     if let Ok(mut stream) = TcpStream::connect(peer) {
-        if let Ok(mut wire) = serde_json::to_vec(message) {
-            wire.push(b'\n');
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
+        if let Ok(mut wire) = authenticated_wire(message) {
+            wire.push(b'\\n');
             let _ = stream.write_all(&wire);
         }
     }
 }
-
 fn broadcast(peers: &Peers, message: &Message) {
     for peer in peers.iter() {
         send(peer, message);
@@ -107,13 +144,11 @@ fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
 }
 
 fn response(stream: &mut TcpStream, message: &Message) {
-    if let Ok(mut wire) = serde_json::to_vec(message) {
-        wire.push(b'\n');
+    if let Ok(mut wire) = authenticated_wire(message) {
+        wire.push(b'\\n');
         let _ = stream.write_all(&wire);
     }
 }
-
-/// Return transactions that can be applied in deterministic sender/nonce order.
 fn select_transactions(chain: &ChainState, pool: &Mempool) -> Vec<Transaction> {
     let mut candidates: Vec<(String, Transaction)> = match pool.lock() {
         Ok(pool) => pool.iter().map(|(id, tx)| (id.clone(), tx.clone())).collect(),
@@ -163,16 +198,37 @@ fn handle(
     seen: Seen,
     pool: Mempool,
     data_file: PathBuf,
+    active_connections: Arc<AtomicUsize>,
 ) {
-    let mut line = String::new();
-    if BufReader::new(match stream.try_clone() { Ok(s) => s, Err(_) => return })
-        .read_line(&mut line).is_err() {
+    let _connection_guard = ConnectionGuard(active_connections);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
+    let mut line = Vec::new();
+    let read_result = {
+        let cloned = match stream.try_clone() { Ok(value) => value, Err(_) => return };
+        let mut reader = BufReader::new(cloned);
+        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\\n', &mut line)
+    };
+    if read_result.is_err() || line.len() as u64 > MAX_MESSAGE_BYTES || line.last() != Some(&b'\\n') {
+        eprintln!("Rejected oversized, incomplete, or unreadable peer message");
         return;
     }
-    let message: Message = match serde_json::from_str(&line) {
+    let envelope: AuthenticatedMessage = match serde_json::from_slice(&line) {
         Ok(value) => value,
-        Err(_) => return,
+        Err(_) => { eprintln!("Rejected malformed peer message"); return; }
     };
+    match peer_token() {
+        Some(expected) if envelope.auth.as_deref() != Some(expected.as_str()) => {
+            eprintln!("Rejected peer with invalid authentication token");
+            return;
+        }
+        None if !stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false) => {
+            eprintln!("Rejected non-loopback peer: set ANA_PEER_TOKEN on every node");
+            return;
+        }
+        _ => {}
+    }
+    let message = envelope.message;
 
     match message.kind.as_str() {
         "get_chain" => {
@@ -323,6 +379,8 @@ fn main() -> Result<()> {
 
     let listener = TcpListener::bind(bind)?;
     println!("ANA TESTNET node listening on {bind}; {} configured peers", peers.len());
+    println!("Network safeguards: {MAX_CONNECTIONS} concurrent connections, {MAX_MESSAGE_BYTES} byte message cap, {SOCKET_TIMEOUT_SECS}s socket timeout.");
+    if peer_token().is_none() { println!("WARNING: ANA_PEER_TOKEN is unset; inbound connections are restricted to loopback."); }
     println!("RandomX testnet difficulty: starts at 8 bits; retargets every 10 completed blocks toward a 30-second target.");
     for peer in peers.iter() {
         send(peer, &Message {
@@ -377,15 +435,24 @@ fn main() -> Result<()> {
         println!("Observer mode: mining disabled.");
     }
 
+    let active_connections = Arc::new(AtomicUsize::new(0));
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let current = active_connections.fetch_add(1, Ordering::SeqCst);
+                if current >= MAX_CONNECTIONS {
+                    active_connections.fetch_sub(1, Ordering::SeqCst);
+                    eprintln!("Rejected connection: connection limit reached");
+                    drop(stream);
+                    continue;
+                }
                 let c = chain.clone();
                 let p = peers.clone();
                 let s = seen.clone();
                 let m = pool.clone();
                 let f = data_file.clone();
-                thread::spawn(move || handle(stream, c, p, s, m, f));
+                let active = active_connections.clone();
+                thread::spawn(move || handle(stream, c, p, s, m, f, active));
             }
             Err(error) => eprintln!("connection error: {error}"),
         }

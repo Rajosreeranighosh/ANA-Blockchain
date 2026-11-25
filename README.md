@@ -135,3 +135,17 @@ The node accepts authenticated newline-delimited JSON requests on its configured
 - `{"kind":"get_transaction","transaction_id":"<transaction-id>"}` returns `confirmed` plus block height, `pending`, or `not_found`.
 
 Transaction status is the responding node's local view; pending transactions are not consensus-final and nodes can temporarily disagree. A transaction marked confirmed can still be affected by a later chain reorganization. This is the existing bounded TCP protocol, not a separate public HTTP/REST service. Do not expose it directly to the public internet.
+
+
+## Wallet-to-node integration v1
+
+The wallet CLI uses the reusable `ana_blockchain::rpc::NodeClient` for authenticated node queries and transaction submission. Configure the same `ANA_PEER_TOKEN` on the wallet and node when token authentication is enabled. Without a token, the node accepts loopback connections only. The TCP connection is plaintext: use a trusted private network or VPN, never expose it directly to the public internet.
+
+New commands:
+
+- `ana-wallet status <node-ip:port>` — network, height, tip hash, minted supply, pending count.
+- `ana-wallet tx-status <transaction-id> <node-ip:port>` — node-local pending/confirmed/not-found view.
+- `ana-wallet balance <address> <node-ip:port>` — validated address balance and next nonce.
+- `ana-wallet send ...` — uses the same authenticated client for balance lookup and signed transaction submission.
+
+The current transaction-submit protocol has no admission acknowledgement. A successful send command means the request was written to the TCP connection, not that the node accepted it; query `tx-status` afterward. A `not_found` result may be temporary or indicate rejection. Status is node-local and confirmations can be reorganized.

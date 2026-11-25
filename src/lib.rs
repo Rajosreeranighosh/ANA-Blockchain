@@ -953,3 +953,6 @@ mod wallet_api_tests {
         assert!(wallet.sign_transaction(&recipient, 0, 0, 0).is_err());
     }
 }
+
+
+pub mod rpc;

@@ -1,48 +1,6 @@
-use ana_blockchain::{address, encrypt_wallet_key, open_encrypted_wallet, open_wallet, parse_amount, sign, Transaction};
+use ana_blockchain::{address, encrypt_wallet_key, open_encrypted_wallet, open_wallet, parse_amount, sign, rpc::NodeClient};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use std::{
-    env,
-    fs,
-    io::{BufRead, BufReader, Write},
-    net::TcpStream,
-    path::Path,
-};
-
-#[derive(Serialize, Deserialize)]
-struct Message {
-    kind: String,
-    #[serde(default)] transaction: Option<Transaction>,
-    #[serde(default)] address: Option<String>,
-    #[serde(default)] balance: Option<u64>,
-    #[serde(default)] nonce: Option<u64>,
-    #[serde(default)] block: Option<serde_json::Value>,
-    #[serde(default)] blocks: Option<Vec<serde_json::Value>>,
-}
-
-fn account(node: &str, address: &str) -> Result<(u64, u64)> {
-    let mut stream = TcpStream::connect(node).context("could not connect to ANA node")?;
-    let request = serde_json::to_string(&Message {
-        kind: "get_account".into(), transaction: None, address: Some(address.into()),
-        balance: None, nonce: None, block: None, blocks: None,
-    })? + "\n";
-    stream.write_all(request.as_bytes())?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line)?;
-    let reply: Message = serde_json::from_str(&line).context("invalid account response")?;
-    if reply.kind != "account" { bail!("node did not return account state"); }
-    Ok((reply.balance.context("missing balance")?, reply.nonce.context("missing nonce")?))
-}
-
-fn submit(node: &str, tx: Transaction) -> Result<()> {
-    let mut stream = TcpStream::connect(node).context("could not connect to ANA node")?;
-    let wire = serde_json::to_string(&Message {
-        kind: "transaction".into(), transaction: Some(tx), address: None,
-        balance: None, nonce: None, block: None, blocks: None,
-    })? + "\n";
-    stream.write_all(wire.as_bytes())?;
-    Ok(())
-}
+use std::{env, fs, io::Write, path::Path};
 
 fn unlock(path: &str) -> Result<ed25519_dalek::SigningKey> {
     let passphrase = rpassword::prompt_password("Wallet passphrase: ")?;
@@ -96,7 +54,8 @@ fn main() -> Result<()> {
         }
         Some("balance") => {
             if args.len() != 4 { bail!("Usage: ana-wallet balance <address> <node-ip:port>"); }
-            let (balance, nonce) = account(&args[3], &args[2])?;
+            let client = NodeClient::new(&args[3]);
+            let (balance, nonce) = client.account(&args[2])?;
             println!("Balance: {}.{:08} ANA", balance / 100_000_000, balance % 100_000_000);
             println!("Next nonce: {nonce}");
         }
@@ -104,17 +63,33 @@ fn main() -> Result<()> {
             if args.len() != 7 { bail!("Usage: ana-wallet send <wallet-file> <recipient> <amount-ANA> <fee-ANA> <node-ip:port>"); }
             let key = unlock(&args[2])?;
             let from = address(&key.verifying_key());
-            let (balance, nonce) = account(&args[6], &from)?;
+            let client = NodeClient::new(&args[6]);
+            let (balance, nonce) = client.account(&from)?;
             let amount = parse_amount(&args[4])?;
             let fee = parse_amount(&args[5])?;
             if balance < amount.checked_add(fee).context("amount overflow")? { bail!("insufficient available balance"); }
             let tx = sign(&key, args[3].clone(), amount, fee, nonce)?;
-            let id = tx.id()?;
-            submit(&args[6], tx)?;
+            let id = client.submit_transaction(tx)?;
             println!("Submitted transaction: {id}");
-            println!("The node will relay it; it is not confirmed until included in a mined block.");
+            println!("The node protocol does not acknowledge admission yet. Check status with: ana-wallet tx-status {id} {}", args[6]);
         }
-        _ => println!("ANA wallet: new [file] | migrate <legacy-file> <encrypted-file> | backup <wallet-file> <backup-file> | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node>"),
+        Some("status") => {
+            if args.len() != 3 { bail!("Usage: ana-wallet status <node-ip:port>"); }
+            let status = NodeClient::new(&args[2]).status()?;
+            println!("Network: {}", status.network);
+            println!("Height: {}", status.height);
+            println!("Tip hash: {}", status.tip_hash);
+            println!("Minted: {}.{:08} ANA", status.minted / 100_000_000, status.minted % 100_000_000);
+            println!("Pending transactions: {}", status.pending_transactions);
+        }
+        Some("tx-status") => {
+            if args.len() != 4 { bail!("Usage: ana-wallet tx-status <transaction-id> <node-ip:port>"); }
+            let status = NodeClient::new(&args[3]).transaction_status(&args[2])?;
+            println!("Transaction: {}", status.transaction_id);
+            println!("Status: {}", status.state);
+            if let Some(height) = status.confirmed_height { println!("Confirmed at block: {height}"); }
+        }
+        _ => println!("ANA wallet: new [file] | migrate <legacy-file> <encrypted-file> | backup <wallet-file> <backup-file> | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node> | status <node> | tx-status <transaction-id> <node>"),
     }
     Ok(())
 }

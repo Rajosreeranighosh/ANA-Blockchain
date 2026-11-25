@@ -809,10 +809,10 @@ mod network_security_tests {
             node_status: None,
         };
         let mut wire = authenticated_wire(&request).unwrap();
-        wire.push(b'\\n');
+        wire.push(b'\n');
         client.write_all(&wire).unwrap();
         let mut ack_line = Vec::new();
-        BufReader::new(client).read_until(b'\\n', &mut ack_line).unwrap();
+        BufReader::new(client).read_until(b'\n', &mut ack_line).unwrap();
         let ack: AuthenticatedMessage = serde_json::from_slice(&ack_line).unwrap();
         assert_eq!(ack.message.transaction_state.as_deref(), Some("accepted"));
 

@@ -752,6 +752,14 @@ fn wallet_kek(passphrase: &[u8], salt: &[u8; 16]) -> Result<zeroize::Zeroizing<[
 
 /// Create an encrypted wallet. Existing files are never overwritten.
 pub fn create_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<String> {
+    let signing = SigningKey::generate(&mut OsRng);
+    let addr = address(&signing.verifying_key());
+    encrypt_wallet_key(path, &signing, passphrase)?;
+    Ok(addr)
+}
+
+/// Encrypt an existing signing key into a new v1 keystore without modifying the source.
+pub fn encrypt_wallet_key(path: &Path, signing: &SigningKey, passphrase: &[u8]) -> Result<()> {
     use chacha20poly1305::{aead::{Aead, KeyInit}, XChaCha20Poly1305, XNonce};
     use rand::RngCore;
     use std::{fs::OpenOptions, io::Write};
@@ -759,13 +767,13 @@ pub fn create_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<String>
         bail!("wallet passphrase must be at least 12 bytes");
     }
     if path.exists() { bail!("refusing to overwrite wallet"); }
-    let signing = SigningKey::generate(&mut OsRng);
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut nonce);
     let key = wallet_kek(passphrase, &salt)?;
-    let cipher = XChaCha20Poly1305::new_from_slice(&*key).map_err(|_| anyhow::anyhow!("invalid wallet encryption key"))?;
+    let cipher = XChaCha20Poly1305::new_from_slice(&*key)
+        .map_err(|_| anyhow::anyhow!("invalid wallet encryption key"))?;
     let ciphertext = cipher.encrypt(XNonce::from_slice(&nonce), signing.to_bytes().as_ref())
         .map_err(|_| anyhow::anyhow!("wallet encryption failed"))?;
     let file = EncryptedWalletFile {
@@ -784,7 +792,7 @@ pub fn create_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<String>
     output.write_all(&serde_json::to_vec_pretty(&file)?)?;
     output.sync_all()?;
     fs::rename(&temp, path).context("could not atomically install wallet file")?;
-    Ok(address(&signing.verifying_key()))
+    Ok(())
 }
 
 /// Unlock a v1 encrypted wallet. Legacy plaintext wallets are intentionally not accepted here.
@@ -839,5 +847,26 @@ mod encrypted_wallet_tests {
         assert!(create_encrypted_wallet(&path, b"short").is_err());
         create_encrypted_wallet(&path, b"a sufficiently long passphrase").unwrap();
         assert!(create_encrypted_wallet(&path, b"another sufficiently long passphrase").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod wallet_migration_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn legacy_wallet_can_be_encrypted_without_changing_its_key() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join("legacy.json");
+        let encrypted = dir.path().join("encrypted.json");
+        let original_address = create_wallet(&legacy).unwrap();
+        let key = open_wallet(&legacy).unwrap();
+        encrypt_wallet_key(&encrypted, &key, b"a sufficiently long passphrase").unwrap();
+        let restored = open_encrypted_wallet(&encrypted, b"a sufficiently long passphrase").unwrap();
+        assert_eq!(address(&restored.verifying_key()), original_address);
+        assert!(legacy.exists());
+        assert!(encrypt_wallet_key(&encrypted, &key, b"another sufficiently long passphrase").is_err());
     }
 }

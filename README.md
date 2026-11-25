@@ -66,3 +66,8 @@ The subsidy is credited to the block's `miner` address and added to the ledger's
 There is no genesis premine. The genesis block is a fixed bootstrap block and the initial ledger has zero minted supply. Every node independently recomputes subsidy and fees while validating/replaying blocks, including during chain synchronization and reorganization. A block that would overflow balances or exceed the supply cap is rejected without partially changing ledger state.
 
 The implementation uses an implicit protocol-defined block subsidy rather than a user-supplied coinbase transaction, preventing miners from choosing an arbitrary mint amount. This is still experimental testnet consensus and has not received an independent security audit.
+
+
+### Persistent mempool (experimental)
+
+Each node stores pending transactions in a sibling file named `<chain-data-file>.mempool.json`. The node writes snapshots through a temporary file and atomic rename, then restores the pool at startup. Restored entries must have a valid signature, matching transaction ID, and be executable against the currently validated ledger; stale, malformed, or unexecutable entries are discarded. Confirmed transactions are removed, and the pool is revalidated after chain updates and reorganizations. This is local node state, not consensus data, and peers may have different mempools.

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
     env,
+    fs,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -54,6 +55,54 @@ fn persist(chain: &SharedChain, path: &Path) {
         if let Err(error) = state.save(path) {
             eprintln!("chain persistence error: {error}");
         }
+    }
+}
+
+/// Derive a separate durable mempool file next to the node's chain file.
+fn mempool_path(data_file: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.mempool.json", data_file.to_string_lossy()))
+}
+
+/// Atomically persist pending transactions. The temporary file is renamed only
+/// after the complete JSON snapshot has been written.
+fn persist_mempool(pool: &Mempool, path: &Path) -> Result<()> {
+    let snapshot = pool.lock()
+        .map_err(|_| anyhow::anyhow!("mempool lock poisoned"))?
+        .clone();
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("tmp");
+    fs::write(&temp, serde_json::to_vec_pretty(&snapshot)?)?;
+    fs::rename(temp, path)?;
+    Ok(())
+}
+
+/// Load only correctly keyed, correctly signed, currently executable transactions.
+fn load_mempool(path: &Path, chain: &ChainState) -> Result<BTreeMap<String, Transaction>> {
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&fs::read(path)?)?;
+    let mut candidates = BTreeMap::new();
+    for (id, tx) in stored {
+        if tx.verify().is_ok() && matches!(tx.id(), Ok(ref actual_id) if actual_id == &id) {
+            candidates.insert(id, tx);
+        }
+    }
+    let pool = Arc::new(Mutex::new(candidates));
+    let accepted: HashSet<String> = select_transactions(chain, &pool)
+        .iter().filter_map(|tx| tx.id().ok()).collect();
+    let mut values = pool.lock()
+        .map_err(|_| anyhow::anyhow!("mempool lock poisoned"))?.clone();
+    values.retain(|id, _| accepted.contains(id));
+    Ok(values)
+}
+
+fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
+    let path = mempool_path(data_file);
+    if let Err(error) = persist_mempool(pool, &path) {
+        eprintln!("mempool persistence error: {error}");
     }
 }
 
@@ -169,6 +218,7 @@ fn handle(
                         for tx in displaced { if let Ok(id) = tx.id() { values.insert(id, tx); } }
                     }
                     prune_mempool(&chain, &pool);
+                    persist_mempool_after_change(&pool, &data_file);
                     persist(&chain, &data_file);
                     println!("Switched to higher-work chain at height {}",
                         chain.lock().map(|s| s.tip().height).unwrap_or(0));
@@ -196,6 +246,7 @@ fn handle(
                         }
                     }
                     prune_mempool(&chain, &pool);
+                    persist_mempool_after_change(&pool, &data_file);
                     persist(&chain, &data_file);
                     broadcast(&peers, &Message {
                         kind: "block".into(), transaction: None, block: Some(block),
@@ -234,6 +285,7 @@ fn handle(
                 }
                 if let Ok(mut values) = seen.lock() { values.insert(id.clone()); }
                 println!("Accepted pending transaction {id}");
+                persist_mempool_after_change(&pool, &data_file);
                 broadcast(&peers, &Message {
                     kind: "transaction".into(), transaction: Some(tx), block: None,
                     blocks: None, address: None, balance: None, nonce: None,
@@ -259,8 +311,15 @@ fn main() -> Result<()> {
     };
     let peers: Peers = Arc::new(args.iter().skip(4).cloned().collect());
     let chain = Arc::new(Mutex::new(ChainState::load(&data_file)?));
-    let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
-    let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+    let mempool_file = mempool_path(&data_file);
+    let restored = {
+        let state = chain.lock().map_err(|_| anyhow::anyhow!("chain lock poisoned"))?;
+        load_mempool(&mempool_file, &state)?
+    };
+    println!("Restored {} pending transaction(s) from {}", restored.len(), mempool_file.display());
+    let restored_ids: HashSet<String> = restored.keys().cloned().collect();
+    let seen: Seen = Arc::new(Mutex::new(restored_ids));
+    let pool: Mempool = Arc::new(Mutex::new(restored));
 
     let listener = TcpListener::bind(bind)?;
     println!("ANA TESTNET node listening on {bind}; {} configured peers", peers.len());
@@ -300,6 +359,7 @@ fn main() -> Result<()> {
                             }
                         }
                         prune_mempool(&mining_chain, &mining_pool);
+                        persist_mempool_after_change(&mining_pool, &mining_file);
                         persist(&mining_chain, &mining_file);
                         broadcast(&mining_peers, &Message {
                             kind: "block".into(), transaction: None, block: Some(block),
@@ -331,4 +391,63 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+ 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ana_blockchain::{address, sign, COIN};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+
+    fn temp_file(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ana-{label}-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ))
+    }
+
+    #[test]
+    fn pending_transactions_survive_restart_and_are_revalidated() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let mut chain = ChainState::new();
+        chain.ledger.balances.insert(sender_address, 5 * COIN);
+        let tx = sign(&sender, address(&receiver.verifying_key()), COIN, 1, 0).unwrap();
+        let id = tx.id().unwrap();
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::from([(id.clone(), tx)])));
+        let path = temp_file("mempool-roundtrip");
+
+        persist_mempool(&pool, &path).unwrap();
+        let restored = load_mempool(&path, &chain).unwrap();
+
+        assert!(restored.contains_key(&id));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn restart_discards_invalid_or_unexecutable_pending_transactions() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let tx = sign(
+            &sender,
+            address(&receiver.verifying_key()),
+            COIN,
+            1,
+            0,
+        ).unwrap();
+        let mut invalid = tx;
+        invalid.amount += 1;
+        let id = invalid.id().unwrap();
+        let stored = BTreeMap::from([(id, invalid)]);
+        let path = temp_file("mempool-invalid");
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let restored = load_mempool(&path, &ChainState::new()).unwrap();
+
+        assert!(restored.is_empty());
+        fs::remove_file(path).unwrap();
+    }
 }

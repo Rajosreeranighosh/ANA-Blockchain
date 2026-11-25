@@ -956,4 +956,5 @@ mod wallet_api_tests {
 
 
 pub mod privacy;
+pub mod privacy_commitments;
 pub mod rpc;

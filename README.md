@@ -15,28 +15,28 @@ sudo apt-get update
 sudo apt-get install -y build-essential cmake
 cargo test --all-targets
 cargo build --release
-``
+```
 
 ## Wallet alpha
 ```sh
 cargo run --release --bin ana-wallet -- new ana-wallet.json
 cargo run --release --bin ana-wallet -- address ana-wallet.json
-``
-The wallet creates an Ed25519 keypair and a local JSON key file. On Unix, file permissions are set to 0600. This file is **not encrypted**. Do not use a wallet containing real value; back it up securely and never share it.
+```
+The wallet creates an Ed25519 keypair and a local JSON key file. On Unix, file permissions are set to 0600. This file is **not encrypted**. Amounts are parsed as exact 8-decimal fixed-point values; floating-point rounding is avoided. Do not use a wallet containing real value; back it up securely and never share it.
 
 ## Start two transaction-relay nodes
 Terminal 1:
 ```sh
 cargo run --release --bin ana-node -- 127.0.0.1:19001 127.0.0.1:19002
-``
+```
 Terminal 2:
 ```sh
 cargo run --release --bin ana-node -- 127.0.0.1:19002 127.0.0.1:19001
-``
+```
 This alpha relays and signature-checks signed transaction messages between configured peers. It is not yet a full P2P blockchain node.
 
-## Transaction format (alpha)
-The library provides Ed25519-signed transactions, sender/public-key matching, network separation, nonce and balance checks in the ledger transition, and a subsidy calculation that stops issuance at 21,000,000 ANA.
+## Transaction and ledger alpha
+The library provides Ed25519-signed transactions, sender/public-key matching, network separation, nonce and balance checks, and a subsidy calculation that stops issuance at 21,000,000 ANA. Ledger transaction and block application are atomic: a failed state transition leaves the previous ledger unchanged.
 
 ## Important limitations — NOT mainnet ready
 - The current `ana-node` is a transaction relay only. It does not mine, validate or propagate blocks, persist a ledger, or provide confirmed balances.

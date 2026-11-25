@@ -4,6 +4,10 @@ $ErrorActionPreference = "Stop"
 # redirection syntax inside add_custom_command(). CMake invokes commands
 # directly, so the redirection is passed as arguments and configuration.asm
 # is never created on MSVC/Windows.
+# Ensure the pinned native dependency is present before locating its source.
+cargo fetch
+if ($LASTEXITCODE -ne 0) { throw "cargo fetch failed." }
+
 $registry = Join-Path $env:USERPROFILE ".cargo\registry\src"
 $matches = Get-ChildItem -Path $registry -Filter "CMakeLists.txt" -Recurse |
     Where-Object { $_.FullName -match "\\randomx-bindings-sys-0\.1\.5\\randomx\\CMakeLists\.txt$" }

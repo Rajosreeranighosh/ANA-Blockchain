@@ -6,7 +6,7 @@ use std::{
     env,
     fs,
     io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex},
     thread,
@@ -36,7 +36,7 @@ type Seen = Arc<Mutex<HashSet<String>>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
 
 const MAX_CONNECTIONS: usize = 64;
-const MAX_MESSAGE_BYTES: u64 = 1024 * 1024;
+const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Serialize, Deserialize)]
@@ -73,7 +73,14 @@ impl Drop for ConnectionGuard {
 
 
 fn send(peer: &str, message: &Message) {
-    if let Ok(mut stream) = TcpStream::connect(peer) {
+    let address = match peer.to_socket_addrs().ok().and_then(|mut values| values.next()) {
+        Some(value) => value,
+        None => return,
+    };
+    if let Ok(mut stream) = TcpStream::connect_timeout(
+        &address,
+        Duration::from_secs(SOCKET_TIMEOUT_SECS),
+    ) {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
         if let Ok(mut wire) = authenticated_wire(message) {
             wire.push(b'\\n');
@@ -516,5 +523,38 @@ mod tests {
 
         assert!(restored.is_empty());
         fs::remove_file(path).unwrap();
+    }
+}
+ 
+#[cfg(test)]
+mod network_security_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_envelope_round_trips_message_and_token_field() {
+        let message = Message {
+            kind: "get_chain".into(),
+            transaction: None,
+            block: None,
+            blocks: None,
+            address: None,
+            balance: None,
+            nonce: None,
+        };
+        let envelope = AuthenticatedMessage {
+            message,
+            auth: Some("test-secret".into()),
+        };
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let decoded: AuthenticatedMessage = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.message.kind, "get_chain");
+        assert_eq!(decoded.auth.as_deref(), Some("test-secret"));
+    }
+
+    #[test]
+    fn message_size_limit_is_nonzero_and_bounded() {
+        assert!(MAX_MESSAGE_BYTES >= 1024);
+        assert!(MAX_MESSAGE_BYTES <= 8 * 1024 * 1024);
+        assert!(MAX_CONNECTIONS > 0);
     }
 }

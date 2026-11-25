@@ -124,3 +124,14 @@ println!("Signed transaction: {}", tx.id()?);
 ```
 
 The API supports encrypted wallet creation, unlocking, public address/key access, and transaction signing. It does not store passphrases, query node balances, broadcast transactions, or manage nonce state; applications must obtain the current nonce from a trusted node and submit the returned signed transaction using the node protocol. Keep unlocked wallet handles short-lived. This API is experimental and has not been independently audited.
+
+
+## Node query API v1 (experimental)
+
+The node accepts authenticated newline-delimited JSON requests on its configured TCP port. These read-only queries use the same peer authentication policy as the node protocol: set the same `ANA_PEER_TOKEN` on both sides, and use a trusted private network or VPN because this TCP transport is not encrypted. With no token configured, inbound connections are loopback-only.
+
+- `{"kind":"get_status"}` returns `kind: "node_status"` with network, current height, tip hash, minted atomic units, and pending transaction count.
+- `{"kind":"get_account","address":"ana1..."}` returns projected balance and next nonce, including valid locally pending transactions. Invalid addresses are ignored.
+- `{"kind":"get_transaction","transaction_id":"<transaction-id>"}` returns `confirmed` plus block height, `pending`, or `not_found`.
+
+Transaction status is the responding node's local view; pending transactions are not consensus-final and nodes can temporarily disagree. A transaction marked confirmed can still be affected by a later chain reorganization. This is the existing bounded TCP protocol, not a separate public HTTP/REST service. Do not expose it directly to the public internet.

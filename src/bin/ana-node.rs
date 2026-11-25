@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -53,7 +53,9 @@ type SharedChain = Arc<Mutex<ChainState>>;
 type Peers = Arc<Vec<String>>;
 type Seen = Arc<Mutex<HashSet<String>>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
-type SyncSessions = Arc<Mutex<BTreeMap<String, Vec<Block>>>>;
+type SyncSessions = Arc<Mutex<BTreeMap<String, SyncSession>>>;
+struct SyncSession { blocks: Vec<Block>, last_updated: Instant }
+const SYNC_SESSION_TTL: Duration = Duration::from_secs(60);
 const MAX_BLOCKS_PER_PAGE: usize = 128;
 const MAX_SYNC_SESSIONS: usize = 16;
 const MAX_SYNC_BLOCKS: usize = 1_000_000;
@@ -74,25 +76,33 @@ fn store_sync_page(
         bail!("invalid chain-sync page bounds");
     }
     let mut sessions = sessions.lock().map_err(|_| anyhow::anyhow!("sync-session lock poisoned"))?;
+    let now = Instant::now();
+    sessions.retain(|_, session| now.duration_since(session.last_updated) <= SYNC_SESSION_TTL);
+
     if start == 0 {
         if sessions.len() >= MAX_SYNC_SESSIONS && !sessions.contains_key(&sync_id) {
-            if let Some(oldest_key) = sessions.keys().next().cloned() { sessions.remove(&oldest_key); }
+            if let Some(oldest_key) = sessions.iter()
+                .min_by_key(|(_, session)| session.last_updated)
+                .map(|(key, _)| key.clone()) {
+                sessions.remove(&oldest_key);
+            }
         }
-        sessions.insert(sync_id.clone(), page);
+        sessions.insert(sync_id.clone(), SyncSession { blocks: page, last_updated: now });
     } else {
-        let candidate = sessions.get_mut(&sync_id).context("unknown chain-sync session")?;
-        if candidate.len() != start || candidate.len().saturating_add(page.len()) > MAX_SYNC_BLOCKS {
+        let candidate = sessions.get_mut(&sync_id).context("unknown or expired chain-sync session")?;
+        if candidate.blocks.len() != start || candidate.blocks.len().saturating_add(page.len()) > MAX_SYNC_BLOCKS {
             sessions.remove(&sync_id);
             bail!("chain-sync page is out of sequence or exceeds the block limit");
         }
-        candidate.extend(page);
+        candidate.blocks.extend(page);
+        candidate.last_updated = now;
     }
-    let candidate_len = sessions.get(&sync_id).map(Vec::len).unwrap_or(0);
+    let candidate_len = sessions.get(&sync_id).map(|session| session.blocks.len()).unwrap_or(0);
     if candidate_len > MAX_SYNC_BLOCKS {
         sessions.remove(&sync_id);
         bail!("chain-sync session exceeds the block limit");
     }
-    if more { Ok(None) } else { Ok(sessions.remove(&sync_id)) }
+    if more { Ok(None) } else { Ok(sessions.remove(&sync_id).map(|session| session.blocks)) }
 }
 
 fn chain_request(start: u64, sync_id: Option<String>) -> Message {

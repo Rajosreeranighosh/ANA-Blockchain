@@ -5,7 +5,7 @@
 //! cryptographic verification. Do not accept these transactions in consensus.
 
 use anyhow::{bail, Result};
-use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, edwards::{CompressedEdwardsY, EdwardsPoint}, scalar::Scalar};
+use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, edwards::{CompressedEdwardsY, EdwardsPoint}, scalar::Scalar, traits::IsIdentity};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
@@ -45,7 +45,6 @@ pub struct PrivacyOutputV1 {
     pub commitment: [u8; 32],
     /// Reserved for authenticated encrypted amount data (8-byte amount + 16-byte tag).
     pub encrypted_amount: [u8; 24],
-    pub view_tag: u8,
 }
 
 /// Experimental private transaction envelope.
@@ -331,7 +330,6 @@ mod tests {
                 stealth: StealthOutputV1 { one_time_key: [4; 32], tx_public_key: [9; 32], view_tag: 7 },
                 commitment: [5; 32],
                 encrypted_amount: [6; 24],
-                view_tag: 7,
             }],
             fee: 100,
             range_proof: vec![8; 64],

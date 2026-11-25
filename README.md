@@ -233,3 +233,8 @@ cargo run --release --bin ana-wallet -- wait-confirmations <transaction-id> 127.
 ```
 
 The example waits for 6 confirmations for up to 600 seconds, checking every 5 seconds. The command reports the node's current local status and fails on timeout; it does not cancel or reverse the transaction. A reorganization can reduce the confirmation count, so reaching a threshold is not deterministic finality. Use a trusted node and the same ANA_PEER_TOKEN configuration as other wallet RPC commands.
+
+
+## Desktop wallet GUI
+
+A native ANA desktop wallet prototype is available for Windows and Linux/Ubuntu. Build and launch it with `cargo run --release --bin ana-wallet-gui`. It includes wallet creation/opening, overview, send with confirmation, receive address QR, node settings, and transaction-ID lookup. See [docs/ANA-WALLET-GUI.md](docs/ANA-WALLET-GUI.md) for details and limitations. The GUI is experimental and does not provide Monero-level privacy or full transaction history.

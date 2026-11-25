@@ -1,67 +1,46 @@
-# ANA Blockchain
+# ANA Blockchain — experimental RandomX testnet
 
-ANA is an experimental independent-chain project targeting Rust, Proof of Work, and RandomX CPU mining.
-
-## Target network parameters
-
-- Project: ANA
-- Consensus target: Proof of Work
-- Intended mining algorithm: RandomX
-- Implementation language: Rust
+## Consensus parameters
+- Network: ANA-TESTNET-1
+- Proof of Work: RandomX (light mode)
+- Testnet RandomX key: ANA-TESTNET-RANDOMX-SEED-v1
+- Fixed testnet difficulty: 8 leading zero bits
 - Maximum supply target: 21,000,000 ANA
-- Initial block reward proposal: 50 ANA
+- Block subsidy: up to 50 ANA per block
 - Atomic units: 100,000,000 per ANA
-- Initial mining focus: CPU
 
-## Current status — experimental prototype
+These parameters are experimental and must not be reused for a public mainnet without a formal consensus specification and security review.
 
-The miner now calls the **RandomX** hashing library through the Rust `randomx-bindings` crate and uses RandomX light mode. Light mode needs roughly 256 MiB of memory for the cache. The first initialization can take time.
-
-This is only a single-process proof-of-work demonstration. It is **not a complete blockchain**, does not yet enforce the 21 million supply cap, and must not be used for real funds or described as a launched cryptocurrency.
-
-The current development key is a placeholder:
-`ANA-DEVNET-RANDOMX-SEED-v1`.
-It is not a finalized consensus seed schedule. All nodes in a real network must derive identical RandomX keys from a formally specified epoch/seed rule.
-
-## Build requirements
-
-- Stable Rust toolchain
-- CMake
-- A C/C++ compiler toolchain
-
-On Ubuntu/Debian:
-
+## Build
+Install stable Rust, CMake and a C/C++ compiler. Then:
 ```sh
-sudo apt-get update
-sudo apt-get install -y build-essential cmake git
+cargo test --all-targets
+cargo build --release
 ```
 
-Install Rust from https://rustup.rs, then run:
-
+## Create a miner wallet
 ```sh
-cargo test
-cargo run --release -- 8
+cargo run --release --bin ana-wallet -- new miner.json
+cargo run --release --bin ana-wallet -- address miner.json
 ```
 
-The argument is the number of leading zero bits required in the RandomX hash. This is a demonstration target only, not a calibrated network difficulty.
+## Run two local nodes
+Use the address printed by the wallet as the miner address. Start the first node:
+```sh
+cargo run --release --bin ana-node -- 127.0.0.1:19001 node-a.json miner-address
+```
+Start a second node in another terminal:
+```sh
+cargo run --release --bin ana-node -- 127.0.0.1:19002 node-b.json none 127.0.0.1:19001
+```
+The nodes request the peer chain at startup, validate received blocks, persist accepted state, and gossip new blocks. The first node mines; the second is an observer (`none`) to avoid two local miners creating competing tips. Configure peers in both directions for resilient propagation.
 
-## What is implemented
-
-- RandomX light-mode cache and VM initialization
-- RandomX hash calculation for candidate block headers
-- Nonce search until a simple leading-zero target is met
-- Fixed prototype genesis block
-- Basic target-check unit tests
-
-## Critical work before a public testnet
-
-1. Specify canonical binary block-header encoding and official RandomX test vectors.
-2. Define a deterministic, network-specific RandomX seed epoch schedule and genesis constants.
-3. Implement full block validation independently of the miner.
-4. Implement signed transactions, wallet key management, mempool, and ledger state.
-5. Enforce the 21,000,000 ANA cap in consensus state, including subsidy schedule and fees.
-6. Implement difficulty retargeting, timestamp rules, chain selection, and reorganization handling.
-7. Add durable storage, P2P networking, peer discovery, and RPC.
-8. Add multi-node integration tests, fuzzing, dependency audits, and independent security review.
-
-**Do not launch mainnet or distribute coins until consensus rules are complete, deterministic, and independently reviewed.**
+## Current testnet-alpha limitations
+- Nodes currently mine empty blocks. Transaction relay exists, but transactions are not yet assembled into blocks or confirmed.
+- Chain selection is append-only: no fork choice, reorganization, cumulative-work comparison, or robust adversarial sync.
+- Difficulty is fixed at 8 bits and is only suitable for local experimentation.
+- RandomX uses one fixed testnet seed; no epoch seed schedule exists.
+- The node protocol has no authentication, rate limits, peer discovery, message size limits, or DoS protection.
+- The JSON-based consensus header encoding is deterministic for this Rust struct today but is not yet a formally versioned canonical wire format.
+- Wallet send still uses nonce 0; balance/nonce RPC and encrypted keystore are not implemented.
+- Do not use for real funds. This is not mainnet-ready software.

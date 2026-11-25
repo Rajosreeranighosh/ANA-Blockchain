@@ -29,14 +29,17 @@ jobs:
       - name: Format Rust sources
         run: cargo fmt --all
       - name: Commit formatting fixes to the PR branch
-        if: github.ref != 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref != 'refs/heads/main'
         run: |
           if ! git diff --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add src
             git commit -m "Apply rustfmt formatting"
-            git push origin "HEAD:${GITHUB_HEAD_REF}"
+            BRANCH="${GITHUB_REF_NAME}"
+            git fetch origin "$BRANCH"
+            git rebase "origin/$BRANCH"
+            git push origin "HEAD:$BRANCH"
           fi
       - name: Verify Rust formatting
         run: cargo fmt --all -- --check

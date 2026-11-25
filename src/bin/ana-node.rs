@@ -119,6 +119,28 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
 
+/// Refuse accidental remote exposure: this prototype has no TLS, so remote
+/// binds require both the shared token and an explicit insecure-transport opt-in.
+fn validate_bind_security(bind: &str, has_token: bool, allow_insecure_remote: bool) -> Result<()> {
+    let addresses: Vec<_> = bind.to_socket_addrs()
+        .context("could not resolve node bind address")?
+        .collect();
+    if addresses.is_empty() {
+        bail!("node bind address resolved to no socket addresses");
+    }
+    if addresses.iter().all(|address| address.ip().is_loopback()) {
+        return Ok(());
+    }
+    if !has_token {
+        bail!("refusing non-loopback bind without ANA_PEER_TOKEN; bind to loopback or configure peer authentication");
+    }
+    if !allow_insecure_remote {
+        bail!("refusing remote bind over plaintext TCP; use a VPN/SSH tunnel or set ANA_ALLOW_INSECURE_REMOTE_BIND=1 only on a trusted private network");
+    }
+    eprintln!("SECURITY WARNING: remote node transport is plaintext TCP; the shared peer token is not encrypted");
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 struct AuthenticatedMessage {
     #[serde(flatten)]
@@ -546,6 +568,8 @@ fn main() -> Result<()> {
         Some(args[3].clone())
     };
     let peers: Peers = Arc::new(args.iter().skip(4).cloned().collect());
+    let allow_remote = env::var("ANA_ALLOW_INSECURE_REMOTE_BIND").as_deref() == Ok("1");
+    validate_bind_security(bind, peer_token().is_some(), allow_remote)?;
     let chain = Arc::new(Mutex::new(ChainState::load(&data_file)?));
     let mempool_file = mempool_path(&data_file);
     let restored = {
@@ -653,6 +677,14 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    #[test]
+    fn remote_bind_requires_token_and_explicit_plaintext_opt_in() {
+        assert!(validate_bind_security("127.0.0.1:19001", false, false).is_ok());
+        assert!(validate_bind_security("0.0.0.0:19001", false, true).is_err());
+        assert!(validate_bind_security("0.0.0.0:19001", true, false).is_err());
+        assert!(validate_bind_security("0.0.0.0:19001", true, true).is_ok());
     }
 
     #[test]

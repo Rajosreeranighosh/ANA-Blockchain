@@ -1,14 +1,19 @@
 [package]
 name = "ana-blockchain"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
-description = "ANA experimental RandomX proof-of-work blockchain prototype"
+description = "ANA experimental RandomX proof-of-work blockchain and testnet"
 
 [dependencies]
 anyhow = "1"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
+rand = "0.8"
 randomx-bindings = "0.1.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

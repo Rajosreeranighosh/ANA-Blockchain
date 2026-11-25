@@ -25,8 +25,7 @@ fn account(node: &str, address: &str) -> Result<(u64, u64)> {
     let request = serde_json::to_string(&Message {
         kind: "get_account".into(), transaction: None, address: Some(address.into()),
         balance: None, nonce: None, block: None, blocks: None,
-    })? + "
-";
+    })? + "\n";
     stream.write_all(request.as_bytes())?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
@@ -40,8 +39,7 @@ fn submit(node: &str, tx: Transaction) -> Result<()> {
     let wire = serde_json::to_string(&Message {
         kind: "transaction".into(), transaction: Some(tx), address: None,
         balance: None, nonce: None, block: None, blocks: None,
-    })? + "
-";
+    })? + "\n";
     stream.write_all(wire.as_bytes())?;
     Ok(())
 }

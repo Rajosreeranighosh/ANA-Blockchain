@@ -8,10 +8,12 @@ description = "ANA experimental RandomX proof-of-work blockchain and testnet"
 [dependencies]
 anyhow = "1"
 argon2 = "0.5"
+bulletproofs = "5.0.0"
 chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 curve25519-dalek = { version = "4", features = ["rand_core"] }
 hex = "0.4"
+merlin = "3"
 rand = "0.8"
 rpassword = "7"
 randomx-bindings = "0.1.4"

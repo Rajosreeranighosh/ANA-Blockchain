@@ -401,6 +401,34 @@ mod tests {
     }
 
     #[test]
+    fn privacy_v1_rejects_small_order_points_in_every_point_field() {
+        // The compressed Edwards encoding with y = 0 decompresses to a
+        // non-identity point of small order. It must not pass prime-subgroup
+        // validation even though it is a decodable curve point.
+        let small_order = [0u8; 32];
+
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].key_image = small_order;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].pseudo_output_commitment = small_order;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].stealth.one_time_key = small_order;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].stealth.tx_public_key = small_order;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].commitment = small_order;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
     fn privacy_v1_rejects_missing_proof_material() {
         let mut tx = structurally_valid_transaction();
         tx.range_proof.clear();

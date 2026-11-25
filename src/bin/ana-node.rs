@@ -663,6 +663,22 @@ mod tests {
     }
 
     #[test]
+    fn chain_sync_expires_abandoned_sessions_before_accepting_pages() {
+        let sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
+        let genesis = ChainState::new().blocks[0].clone();
+        sessions.lock().unwrap().insert(
+            "stale-tip".into(),
+            SyncSession {
+                blocks: vec![genesis.clone()],
+                last_updated: Instant::now() - SYNC_SESSION_TTL - Duration::from_secs(1),
+            },
+        );
+
+        assert!(store_sync_page(&sessions, "stale-tip".into(), 1, vec![genesis], 2, false).is_err());
+        assert!(sessions.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn chain_sync_rejects_out_of_order_and_unknown_sessions() {
         let sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
         let genesis = ChainState::new().blocks[0].clone();

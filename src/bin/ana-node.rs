@@ -28,6 +28,23 @@ struct Message {
     balance: Option<u64>,
     #[serde(default)]
     nonce: Option<u64>,
+    #[serde(default)]
+    transaction_id: Option<String>,
+    #[serde(default)]
+    transaction_state: Option<String>,
+    #[serde(default)]
+    confirmed_height: Option<u64>,
+    #[serde(default)]
+    node_status: Option<NodeStatus>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct NodeStatus {
+    network: String,
+    height: u64,
+    tip_hash: String,
+    minted: u64,
+    pending_transactions: usize,
 }
 
 type SharedChain = Arc<Mutex<ChainState>>;
@@ -61,6 +78,10 @@ fn authenticated_wire(message: &Message) -> Result<Vec<u8>> {
             address: message.address.clone(),
             balance: message.balance,
             nonce: message.nonce,
+            transaction_id: message.transaction_id.clone(),
+            transaction_state: message.transaction_state.clone(),
+            confirmed_height: message.confirmed_height,
+            node_status: message.node_status.clone(),
         },
         auth: peer_token(),
     })?)
@@ -198,6 +219,20 @@ fn projected_ledger(chain: &SharedChain, pool: &Mempool) -> Option<Ledger> {
     Some(ledger)
 }
 
+
+/// Return the responding node's local view of a transaction.
+fn transaction_status(blocks: &[Block], pool: &Mempool, id: &str) -> (String, Option<u64>) {
+    for block in blocks {
+        if block.transactions.iter().any(|tx| tx.id().ok().as_deref() == Some(id)) {
+            return ("confirmed".into(), Some(block.height));
+        }
+    }
+    if pool.lock().map(|values| values.contains_key(id)).unwrap_or(false) {
+        return ("pending".into(), None);
+    }
+    ("not_found".into(), None)
+}
+
 fn handle(
     mut stream: TcpStream,
     chain: SharedChain,
@@ -243,16 +278,51 @@ fn handle(
                 response(&mut stream, &Message {
                     kind: "blocks".into(), transaction: None, block: None,
                     blocks: Some(state.blocks.clone()), address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                 });
             }
         }
         "get_account" => {
             if let Some(address) = message.address {
-                if let Some(ledger) = projected_ledger(&chain, &pool) {
+                if validate_address(&address).is_ok() {
+                    if let Some(ledger) = projected_ledger(&chain, &pool) {
+                        response(&mut stream, &Message {
+                            kind: "account".into(), transaction: None, block: None, blocks: None,
+                            address: Some(address.clone()), balance: Some(ledger.balance(&address)),
+                            nonce: Some(ledger.nonce(&address)),
+                            transaction_id: None, transaction_state: None, confirmed_height: None,
+                            node_status: None,
+                        });
+                    }
+                }
+            }
+        }
+        "get_status" => {
+            if let (Ok(state), Ok(pending)) = (chain.lock(), pool.lock()) {
+                let tip = state.tip();
+                response(&mut stream, &Message {
+                    kind: "node_status".into(), transaction: None, block: None, blocks: None,
+                    address: None, balance: None, nonce: None,
+                    transaction_id: None, transaction_state: None, confirmed_height: None,
+                    node_status: Some(NodeStatus {
+                        network: ana_blockchain::NETWORK.into(),
+                        height: tip.height,
+                        tip_hash: tip.hash.clone(),
+                        minted: state.ledger.minted,
+                        pending_transactions: pending.len(),
+                    }),
+                });
+            }
+        }
+        "get_transaction" => {
+            if let Some(id) = message.transaction_id {
+                if let Ok(state) = chain.lock() {
+                    let (status, height) = transaction_status(&state.blocks, &pool, &id);
                     response(&mut stream, &Message {
-                        kind: "account".into(), transaction: None, block: None, blocks: None,
-                        address: Some(address.clone()), balance: Some(ledger.balance(&address)),
-                        nonce: Some(ledger.nonce(&address)),
+                        kind: "transaction_status".into(), transaction: None, block: None, blocks: None,
+                        address: None, balance: None, nonce: None,
+                        transaction_id: Some(id), transaction_state: Some(status),
+                        confirmed_height: height, node_status: None,
                     });
                 }
             }
@@ -288,6 +358,7 @@ fn handle(
                     broadcast(&peers, &Message {
                         kind: "get_chain".into(), transaction: None, block: None,
                         blocks: None, address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                     });
                 }
             }
@@ -314,12 +385,14 @@ fn handle(
                     broadcast(&peers, &Message {
                         kind: "block".into(), transaction: None, block: Some(block),
                         blocks: None, address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                     });
                 } else {
                     eprintln!("Block does not extend local tip; requesting peer chain");
                     broadcast(&peers, &Message {
                         kind: "get_chain".into(), transaction: None, block: None,
                         blocks: None, address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                     });
                 }
             }
@@ -352,6 +425,7 @@ fn handle(
                 broadcast(&peers, &Message {
                     kind: "transaction".into(), transaction: Some(tx), block: None,
                     blocks: None, address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                 });
             }
         }
@@ -393,6 +467,7 @@ fn main() -> Result<()> {
         send(peer, &Message {
             kind: "get_chain".into(), transaction: None, block: None,
             blocks: None, address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
         });
     }
 
@@ -429,6 +504,7 @@ fn main() -> Result<()> {
                         broadcast(&mining_peers, &Message {
                             kind: "block".into(), transaction: None, block: Some(block),
                             blocks: None, address: None, balance: None, nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
                         });
                     }
                 }
@@ -480,6 +556,21 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ))
+    }
+
+    #[test]
+    fn transaction_status_reports_pending_confirmed_and_unknown() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let tx = sign(&sender, address(&receiver.verifying_key()), 1, 0, 0).unwrap();
+        let id = tx.id().unwrap();
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::from([(id.clone(), tx.clone())])));
+        let mut block = ChainState::new().blocks[0].clone();
+        block.height = 1;
+        block.transactions.push(tx);
+        assert_eq!(transaction_status(&[block], &pool, &id), ("confirmed".into(), Some(1)));
+        assert_eq!(transaction_status(&[], &pool, &id), ("pending".into(), None));
+        assert_eq!(transaction_status(&[], &pool, "missing"), ("not_found".into(), None));
     }
 
     #[test]
@@ -540,6 +631,7 @@ mod network_security_tests {
             address: None,
             balance: None,
             nonce: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
         };
         let envelope = AuthenticatedMessage {
             message,

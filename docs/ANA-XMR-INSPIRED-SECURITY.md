@@ -1,145 +1,58 @@
 # ANA XMR-Inspired Security and Privacy Requirements (Draft)
 
-## Status and safety boundary
-
-This document is a security engineering plan, not a security certification. ANA's
-privacy transaction envelope and stealth-address wallet code are experimental.
-The current prototype does not implement or verify CLSAG, Pedersen commitments,
-range proofs, authenticated amount encryption, or consensus key-image rules.
-Do not use it to protect real funds or enable it in consensus.
-
-ANA may learn from Monero's publicly documented design, but must not claim
-Monero-equivalent privacy or security. Cryptographic protocol choices require
-expert review and independent audit.
+Status: design requirements only. ANA's privacy prototype is experimental and is not safe for real funds. Private transactions must remain disabled in consensus until reviewed cryptography, full consensus verification, adversarial testing, and independent audit are complete.
 
 ## Security goals
+- One-time stealth outputs to reduce recipient linkage.
+- Confidential amounts using reviewed Pedersen commitments and authenticated amount encryption.
+- Reviewed linkable ring signatures (CLSAG-family) to hide the spent ring member.
+- Consensus-enforced unique key images to prevent double spends.
+- Range proofs to prevent negative or out-of-range amounts.
+- Reorg-safe spent-output/key-image state and deterministic consensus.
+- Encrypted peer transport, authenticated node identities, RPC access controls, and wallet key protection.
 
-1. Hide recipient linkage using one-time output keys.
-2. Hide transferred amounts using authenticated encrypted amounts and
-   Pedersen commitments.
-3. Hide which ring member is spent using a reviewed linkable ring signature.
-4. Prevent double spends with consensus-enforced, globally unique key images.
-5. Prove amounts are non-negative and within the monetary range.
-6. Preserve deterministic consensus, reorg safety, and ANA's fixed economics.
-7. Protect wallet secrets, peer communications, and node availability.
+## Required cryptography
+Do not invent primitives or treat placeholder byte arrays as proofs. Select maintained, reviewed implementations for CLSAG-compatible signatures, Pedersen commitments, range proofs, and authenticated encryption. Specify canonical point/scalar encodings, domain separation, network binding, transcript construction, and strict rejection of malformed/non-canonical inputs. Verify ring membership, output eligibility, signature correctness, key-image validity/uniqueness, commitment balance including fees, and range proofs before mutating state.
 
-## Non-goals
+## Wallet requirements
+Separate spend and view keys; support view-only scanning. Encrypt secrets at rest with reviewed KDF and AEAD parameters. Never log or debug-print secrets. Test backup/restore, migration, wrong-network addresses, secure randomness, and failure handling. Endpoint compromise and unsafe backups remain privacy risks.
 
-- No promise of perfect anonymity or protection against endpoint compromise.
-- No promise that a ring size of 16 provides a particular anonymity level.
-- No custom cryptographic primitive invented by the ANA project.
-- No mainnet activation based solely on passing unit tests.
+## Network requirements
+The current plaintext peer protocol must not be exposed to the public internet. Before public testnet, add reviewed encrypted/authenticated transport, peer identity, replay protection, rate limits, bounded queues, strict frame limits, timeouts, peer scoring, and fuzzing. Keep RPC local by default; authenticate and encrypt remote access. Analyze Sybil/eclipse attacks and metadata leakage.
 
-## Required transaction cryptography
-
-### Outputs and amounts
-- Use a reviewed, domain-separated derivation for one-time output keys.
-- Use a reviewed Pedersen commitment construction with documented generators.
-- Encrypt amounts with authenticated encryption and bind ciphertext to the
-  network, transaction, output index, and commitment context.
-- Verify a vetted range-proof system; reject malformed, non-canonical, or
-  out-of-range encodings before state mutation.
-- Specify canonical point/scalar decoding and reject invalid, small-order,
-  non-canonical, or identity encodings where prohibited.
-
-### Inputs and double-spend prevention
-- Use a reviewed CLSAG-compatible implementation or a maintained audited
-  library; do not accept opaque signature bytes as proof.
-- Derive key images according to the reviewed protocol and verify them in
-  consensus. Maintain a persistent key-image spent set.
-- Define deterministic ring construction, output eligibility, unlock/maturity
-  rules, decoy sampling, and versioned changes.
-- Verify all ring members exist and are distinct before signature validation.
-
-### Balance and supply
-- Verify commitment balance, including the explicit fee commitment.
-- Prevent integer overflow and negative values in all amount conversions.
-- Enforce the 21,000,000 ANA cap across mining rewards, fees, forks, reorgs,
-  snapshots, and restart recovery. Fees are not newly minted.
-- Add invariant/property tests for every consensus state transition.
-
-## Wallet security
-- Separate spend and view secrets; support view-only scanning without spend
-  authority.
-- Persist secrets only in an encrypted keystore using reviewed KDF and AEAD
-  parameters, with versioned formats and authenticated metadata.
-- Never log, serialize, debug-print, or expose secret scalars in errors.
-- Define secure random generation, backup, restore, recovery, and migration.
-- Add address checksums/network prefixes and test wrong-network rejection.
-- Document that malware, compromised devices, screenshots, and unsafe backups
-  can defeat wallet privacy.
-
-## Network and node security
-- Do not expose the current plaintext peer protocol to the public internet.
-- Require authenticated, encrypted peer transport (for example, a reviewed
-  TLS/noise-based channel) with peer identity and replay protection before
-  public testnet use.
-- Apply strict message/frame limits, timeouts, rate limits, connection caps,
-  and bounded queues. Validate before allocating large buffers.
-- Add peer scoring, ban/expiry policy, eclipse/Sybil threat analysis, and
-  independent seed-node operation.
-- Treat RPC as a separate trust boundary: bind locally by default, authenticate
-  remote access, encrypt remote transport, and avoid leaking wallet metadata.
-- Fuzz all network decoders and test malformed, oversized, slow, and replayed
-  traffic.
-
-## Consensus and implementation safety
-- Publish a versioned consensus specification and canonical transaction/block
-  encoding before activation.
-- Use domain separation for signatures, hashes, key derivation, and network IDs.
-- Keep transparent and private transaction versions explicitly separated.
-- Make validation deterministic across supported platforms and implementations.
-- Ensure failed validation cannot partially mutate chain, mempool, key-image,
-  or wallet state.
-- Test reorgs, crash recovery, snapshot import, duplicate transactions, and
-  conflicting spends.
+## Consensus/economics
+Freeze a versioned consensus specification and canonical encoding. Keep transparent and private transaction versions explicitly separated. Enforce commitment balance, explicit fees, overflow-safe amount arithmetic, and the existing 21,000,000 ANA supply cap across blocks, forks, reorgs, snapshots, and restarts. Fees are not newly minted. Preserve zero premine and no tail emission.
 
 ## Privacy leakage review
-Assess and document leakage from:
-- network-layer IP metadata and peer timing;
-- transaction timing, amount/fee patterns, and ring decoy distributions;
-- wallet address reuse, change outputs, and scanning behavior;
-- RPC logs, telemetry, crash dumps, and backups;
-- exchanges, merchants, endpoints, and user operational behavior.
+Assess IP/timing metadata, transaction timing and fee patterns, decoy selection, address reuse, change outputs, RPC logs, telemetry, crash dumps, backups, exchanges, merchants, and endpoint behavior. Protocol privacy does not equal network anonymity. Tor/I2P support requires its own threat model and operational review.
 
-Protocol privacy is not network anonymity. Recommend Tor/I2P-compatible
-networking only after a separate threat model and operational review.
-
-## Required release gates
-
-A private-transaction testnet must not launch until all are complete:
-- [ ] Protocol specification and canonical encoding frozen.
+## Release gates
+- [ ] Versioned protocol specification and canonical encoding frozen.
 - [ ] Cryptographic components selected from reviewed implementations.
-- [ ] Independent cryptographic design review completed.
-- [ ] CLSAG/signature, commitment, range-proof, and amount-encryption vectors.
-- [ ] Negative/adversarial/fuzz tests for every parser and verifier.
-- [ ] Key-image uniqueness and reorg-safe persistence tests.
+- [ ] Independent cryptographic design review.
+- [ ] Positive and negative test vectors for signatures, commitments, range proofs, and amount encryption.
+- [ ] Parser/verifier fuzzing and adversarial tests.
+- [ ] Key-image uniqueness, atomic persistence, and reorg rollback tests.
 - [ ] Supply-cap and commitment-balance property tests.
-- [ ] Wallet backup/restore and secret-handling review.
+- [ ] Wallet secret-handling and backup/restore review.
 - [ ] Encrypted peer transport and RPC security review.
 - [ ] Multi-operator testnet soak, attack simulation, and recovery drills.
 - [ ] Independent audit findings resolved and reproducible release builds.
 
-Mainnet activation additionally requires a public audit report, documented
-upgrade/governance process, monitored testnet history, and explicit go/no-go
-approval. Passing CI alone is insufficient.
+CI success alone is insufficient. Mainnet activation requires a public audit report, documented upgrade process, monitored testnet history, and explicit go/no-go approval.
 
-## Immediate implementation order
-
+## Implementation order
 1. Keep private transactions disabled in consensus.
-2. Add canonical serialization and strict cryptographic encoding tests.
-3. Select and integrate reviewed primitives for commitments, range proofs,
-   authenticated amount encryption, and CLSAG; do not write bespoke crypto.
-4. Implement key-image state with atomic persistence and reorg rollback.
+2. Add canonical serialization and cryptographic encoding tests.
+3. Integrate reviewed commitments, range proofs, authenticated amount encryption, and CLSAG.
+4. Implement persistent key-image state with atomic updates and reorg rollback.
 5. Build wallet scanning, amount recovery, and encrypted key storage.
-6. Add private mempool/block/RPC integration behind a new protocol version.
+6. Integrate private transactions into mempool, blocks, wallet, and RPC behind a new protocol version.
 7. Run adversarial multi-node testnet and independent audit.
 
 ## References
-
 - Monero source: https://github.com/monero-project/monero
-- Monero documentation: https://www.getmonero.org/resources/developer-guides/
+- Monero developer guides: https://www.getmonero.org/resources/developer-guides/
 - Zero to Monero: https://www.getmonero.org/library/Zero-to-Monero-2-0-0.pdf
 
-These references are starting points for study, not a claim that ANA implements
-Monero's protocol or inherits its security.
+These are study references, not evidence that ANA implements Monero or inherits its security.

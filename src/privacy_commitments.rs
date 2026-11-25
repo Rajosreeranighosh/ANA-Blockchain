@@ -2,15 +2,16 @@
 //!
 //! This module uses Ristretto points, deliberately separate from the Edwards
 //! point encodings used by the current privacy transaction envelope.
-//! It is a primitive prototype only: no range proofs, transaction balance
-//! verification, CLSAG, amount encryption, or consensus integration is provided.
-//! Do not use these functions to authorize or accept a transaction.
+//! It is a primitive prototype only: no range proofs, CLSAG, authenticated
+//! amount encryption, or consensus integration is provided. Do not use these
+//! functions to authorize or accept a transaction.
 
 use anyhow::{bail, Result};
 use curve25519_dalek::{
     constants::RISTRETTO_BASEPOINT_POINT,
     ristretto::{CompressedRistretto, RistrettoPoint},
     scalar::Scalar,
+    traits::Identity,
 };
 use sha2::Sha512;
 
@@ -63,6 +64,51 @@ pub fn add_commitments(
         .decompress()
         .ok_or_else(|| anyhow::anyhow!("invalid right Ristretto commitment"))?;
     Ok((left + right).compress().to_bytes())
+}
+
+/// Verify the Pedersen amount-balance equation for a transaction.
+///
+/// Under ANA's C = amount*G + blinding*H convention, this checks:
+/// sum(inputs) - sum(outputs) - fee*G == identity.
+///
+/// This is only an algebraic commitment check. It does not prove that input
+/// commitments belong to ring members, that CLSAG signatures are valid, or
+/// that any committed amount is in range. Those checks are mandatory elsewhere.
+pub fn verify_commitment_balance(
+    input_commitments: &[[u8; 32]],
+    output_commitments: &[[u8; 32]],
+    fee: u64,
+) -> Result<()> {
+    if input_commitments.is_empty() || output_commitments.is_empty() {
+        bail!("commitment balance requires at least one input and output");
+    }
+
+    let mut balance = RistrettoPoint::identity();
+    for encoded in input_commitments {
+        let point = CompressedRistretto(*encoded)
+            .decompress()
+            .ok_or_else(|| anyhow::anyhow!("invalid input commitment encoding"))?;
+        if point.compress().to_bytes() != *encoded {
+            bail!("non-canonical input commitment encoding");
+        }
+        balance += point;
+    }
+
+    for encoded in output_commitments {
+        let point = CompressedRistretto(*encoded)
+            .decompress()
+            .ok_or_else(|| anyhow::anyhow!("invalid output commitment encoding"))?;
+        if point.compress().to_bytes() != *encoded {
+            bail!("non-canonical output commitment encoding");
+        }
+        balance -= point;
+    }
+
+    balance -= RISTRETTO_BASEPOINT_POINT * Scalar::from(fee);
+    if balance != RistrettoPoint::identity() {
+        bail!("Pedersen input/output/fee commitments are not balanced");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -118,10 +164,39 @@ mod tests {
         let sum = add_commitments(&a, &b).unwrap();
         let point = CompressedRistretto(sum).decompress().unwrap();
         assert_eq!(point.compress().to_bytes(), sum);
-        assert!(verify_opening(
-            &sum,
-            13,
-            Scalar::from(34u64)
-        ).is_ok());
+        assert!(verify_opening(&sum, 13, Scalar::from(34u64)).is_ok());
+    }
+
+    #[test]
+    fn balanced_transaction_commitments_include_explicit_fee() {
+        // 1,000 input units = 400 + 500 output units + 100 fee.
+        // Input blinding is the sum of output blindings.
+        let input = commit_amount(1_000, Scalar::from(30u64));
+        let outputs = [
+            commit_amount(400, Scalar::from(10u64)),
+            commit_amount(500, Scalar::from(20u64)),
+        ];
+        assert!(verify_commitment_balance(&[input], &outputs, 100).is_ok());
+    }
+
+    #[test]
+    fn commitment_balance_rejects_wrong_fee_or_unbalanced_amounts() {
+        let input = commit_amount(1_000, Scalar::from(30u64));
+        let outputs = [
+            commit_amount(400, Scalar::from(10u64)),
+            commit_amount(500, Scalar::from(20u64)),
+        ];
+        assert!(verify_commitment_balance(&[input], &outputs, 99).is_err());
+        let bad_output = commit_amount(501, Scalar::from(20u64));
+        assert!(verify_commitment_balance(&[input], &[outputs[0], bad_output], 100).is_err());
+    }
+
+    #[test]
+    fn commitment_balance_rejects_empty_sets_and_malformed_points() {
+        let valid = commit_amount(10, Scalar::from(4u64));
+        assert!(verify_commitment_balance(&[], &[valid], 0).is_err());
+        assert!(verify_commitment_balance(&[valid], &[], 0).is_err());
+        assert!(verify_commitment_balance(&[[0xff; 32]], &[valid], 0).is_err());
+        assert!(verify_commitment_balance(&[valid], &[[0xff; 32]], 0).is_err());
     }
 }

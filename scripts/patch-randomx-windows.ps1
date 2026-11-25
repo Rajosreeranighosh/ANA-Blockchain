@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 # randomx-bindings-sys 0.1.5 uses shell-style redirection in a CMake
 # COMMAND. CMake does not invoke a shell, so generate the MASM include with
-# PowerShell and absolute paths rooted at RandomX's source directory.
+# PowerShell and absolute paths rooted at RandomX source directory.
 cargo fetch
 if ($LASTEXITCODE -ne 0) { throw "cargo fetch failed." }
 
@@ -15,7 +15,7 @@ if (-not $matches) {
 }
 
 $commandPattern = '(?im)^[ \t]*COMMAND\b[^\r\n]*h2inc\.ps1[^\r\n]*configuration\.asm[^\r\n]*$'
-$replacement = '  COMMAND powershell -NoProfile -ExecutionPolicy Bypass -Command "& { & ''\${CMAKE_CURRENT_SOURCE_DIR}/vcxproj/h2inc.ps1'' ''\${CMAKE_CURRENT_SOURCE_DIR}/src/configuration.h'' | Set-Content -Encoding ascii ''\${CMAKE_CURRENT_SOURCE_DIR}/src/asm/configuration.asm'' }"'
+$replacement = '  COMMAND powershell -NoProfile -ExecutionPolicy Bypass -Command "& { & ''''${CMAKE_CURRENT_SOURCE_DIR}/vcxproj/h2inc.ps1'''' ''''${CMAKE_CURRENT_SOURCE_DIR}/src/configuration.h'''' | Set-Content -Encoding ascii ''''${CMAKE_CURRENT_SOURCE_DIR}/src/asm/configuration.asm'''' }"'
 
 foreach ($file in $matches) {
     $content = Get-Content -LiteralPath $file.FullName -Raw

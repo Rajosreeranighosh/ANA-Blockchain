@@ -181,7 +181,8 @@ impl AnaWalletApp {
                 qrcode::Color::Dark => egui::Color32::BLACK,
                 qrcode::Color::Light => egui::Color32::WHITE,
             }).collect();
-            let image = egui::ColorImage::new([width, width], pixels);
+            let mut image = egui::ColorImage::new([width, width], egui::Color32::WHITE);
+            image.pixels = pixels;
             self.qr_texture = Some(ctx.load_texture("ana-receive-address", image, egui::TextureOptions::NEAREST));
         }
     }

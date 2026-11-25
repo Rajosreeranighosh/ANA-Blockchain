@@ -15,6 +15,7 @@ pub const DIFFICULTY_RETARGET_INTERVAL: u64 = 10;
 pub const TARGET_BLOCK_SECONDS: u64 = 30;
 pub const MIN_TESTNET_DIFFICULTY: u16 = 4;
 pub const MAX_TESTNET_DIFFICULTY: u16 = 24;
+pub const MEDIAN_TIME_WINDOW: usize = 11;
 pub const RANDOMX_SEED: &[u8] = b"ANA-TESTNET-RANDOMX-SEED-v1";
 
 /// Parse a human ANA amount without floating-point rounding.
@@ -271,6 +272,32 @@ impl Ledger {
 mod tests {
     use super::*;
 
+    #[test]
+    fn median_time_past_uses_the_upper_median_of_recent_blocks() {
+        let mut blocks = vec![genesis_block()];
+        for (height, timestamp) in [100, 110, 120, 130].iter().enumerate() {
+            let mut block = genesis_block();
+            block.height = height as u64 + 1;
+            block.timestamp = *timestamp;
+            blocks.push(block);
+        }
+        assert_eq!(median_time_past(&blocks).unwrap(), 120);
+    }
+
+    #[test]
+    fn block_timestamp_must_be_greater_than_median_time_past() {
+        let mut blocks = vec![genesis_block()];
+        for height in 1..=5 {
+            let mut block = genesis_block();
+            block.height = height;
+            block.timestamp = 1_764_096_000 + height * 10;
+            blocks.push(block);
+        }
+        let median = median_time_past(&blocks).unwrap();
+        assert!(validate_block_timestamp(&blocks, median).is_err());
+        assert!(validate_block_timestamp(&blocks, median + 1).is_ok());
+    }
+
     fn retarget_history(elapsed: u64, tip_difficulty: u16) -> Vec<Block> {
         let genesis = genesis_block();
         let mut blocks = vec![genesis.clone()];
@@ -499,6 +526,26 @@ pub fn genesis_block() -> Block {
     }
 }
 
+/// Median of up to the last 11 timestamps in the existing chain.
+pub fn median_time_past(blocks: &[Block]) -> Result<u64> {
+    if blocks.is_empty() {
+        bail!("chain is empty");
+    }
+    let start = blocks.len().saturating_sub(MEDIAN_TIME_WINDOW);
+    let mut timestamps: Vec<u64> = blocks[start..].iter().map(|block| block.timestamp).collect();
+    timestamps.sort_unstable();
+    Ok(timestamps[timestamps.len() / 2])
+}
+
+/// A new block must be strictly later than the median of recent block timestamps.
+pub fn validate_block_timestamp(blocks: &[Block], timestamp: u64) -> Result<()> {
+    let median = median_time_past(blocks)?;
+    if timestamp <= median {
+        bail!("block timestamp must be greater than median-time-past ({median})");
+    }
+    Ok(())
+}
+
 /// Derive the next block difficulty using only the validated chain history.
 /// Retargets every 10 completed blocks, moving at most one bit per window.
 pub fn expected_next_difficulty(blocks: &[Block]) -> Result<u16> {
@@ -580,9 +627,7 @@ impl ChainState {
         if block.previous != previous.hash {
             bail!("previous block hash mismatch");
         }
-        if block.timestamp < previous.timestamp {
-            bail!("block timestamp moved backwards");
-        }
+        validate_block_timestamp(&self.blocks, block.timestamp)?;
         let expected_difficulty = expected_next_difficulty(&self.blocks)?;
         if block.difficulty != expected_difficulty {
             bail!("unexpected block difficulty: expected {expected_difficulty}, got {}", block.difficulty);
@@ -622,8 +667,10 @@ impl ChainState {
         }
         let previous = self.tip();
         let height = previous.height.checked_add(1).context("height overflow")?;
+        let median = median_time_past(&self.blocks)?;
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-            .max(previous.timestamp);
+            .max(previous.timestamp.checked_add(1).context("timestamp overflow")?)
+            .max(median.checked_add(1).context("median timestamp overflow")?);
         let mut block = Block {
             height,
             previous: previous.hash.clone(),

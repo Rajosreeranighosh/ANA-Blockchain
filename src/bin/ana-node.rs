@@ -83,7 +83,7 @@ fn send(peer: &str, message: &Message) {
     ) {
         let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
         if let Ok(mut wire) = authenticated_wire(message) {
-            wire.push(b'\\n');
+            wire.push(b'\n');
             let _ = stream.write_all(&wire);
         }
     }
@@ -152,7 +152,7 @@ fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
 
 fn response(stream: &mut TcpStream, message: &Message) {
     if let Ok(mut wire) = authenticated_wire(message) {
-        wire.push(b'\\n');
+        wire.push(b'\n');
         let _ = stream.write_all(&wire);
     }
 }
@@ -214,9 +214,9 @@ fn handle(
     let read_result = {
         let cloned = match stream.try_clone() { Ok(value) => value, Err(_) => return };
         let mut reader = BufReader::new(cloned);
-        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\\n', &mut line)
+        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\n', &mut line)
     };
-    if read_result.is_err() || line.len() as u64 > MAX_MESSAGE_BYTES || line.last() != Some(&b'\\n') {
+    if read_result.is_err() || line.len() as u64 > MAX_MESSAGE_BYTES || line.last() != Some(&b'\n') {
         eprintln!("Rejected oversized, incomplete, or unreadable peer message");
         return;
     }

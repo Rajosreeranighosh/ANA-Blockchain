@@ -15,6 +15,33 @@ if (-not $matches) {
     throw "randomx-bindings-sys 0.1.5 CMakeLists.txt was not found. Run cargo fetch first."
 }
 
+# CI diagnostics: report the exact packaged paths before modifying CMake.
+foreach ($file in $matches) {
+    $randomxRoot = Split-Path -Parent $file.FullName
+    Write-Host "=== RandomX package path diagnostics ==="
+    Write-Host "CMakeLists: $($file.FullName)"
+    foreach ($relative in @(
+        "vcxproj",
+        "vcxproj/h2inc.ps1",
+        "src/configuration.h",
+        "src/asm",
+        "src/asm/configuration.asm"
+    )) {
+        $candidate = Join-Path $randomxRoot $relative
+        Write-Host ("PATH_CHECK {0} = {1}" -f $candidate, (Test-Path -LiteralPath $candidate))
+    }
+    Write-Host "=== CMake generation directives ==="
+    Get-Content -LiteralPath $file.FullName |
+        Where-Object { $_ -match "h2inc|configuration\\.asm|WORKING_DIRECTORY" } |
+        ForEach-Object { Write-Host $_ }
+    Write-Host "=== RandomX package top-level entries ==="
+    Get-ChildItem -LiteralPath $randomxRoot -Force |
+        Select-Object Mode, Name |
+        Format-Table -AutoSize |
+        Out-String |
+        Write-Host
+}
+
 $commandPattern = '(?im)^[ \t]*COMMAND\b[^\r\n]*h2inc\.ps1[^\r\n]*configuration\.asm[^\r\n]*$'
 $replacement = '  COMMAND powershell -NoProfile -ExecutionPolicy Bypass -Command "& { Set-Location -LiteralPath ''${CMAKE_CURRENT_SOURCE_DIR}/vcxproj''; New-Item -ItemType Directory -Force -Path ''${CMAKE_CURRENT_SOURCE_DIR}/src/asm'' | Out-Null; & ''${CMAKE_CURRENT_SOURCE_DIR}/vcxproj/h2inc.ps1'' ''${CMAKE_CURRENT_SOURCE_DIR}/src/configuration.h'' | Set-Content -Encoding ascii ''${CMAKE_CURRENT_SOURCE_DIR}/src/asm/configuration.asm'' }"'
 

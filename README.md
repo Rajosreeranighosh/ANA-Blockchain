@@ -40,13 +40,14 @@ cargo run --release --bin ana-node -- 127.0.0.1:19002 node-b.json none 127.0.0.1
 The nodes request the peer chain at startup, validate received blocks, compare cumulative work, reorganize to a higher-work valid chain, persist accepted state, and gossip new blocks. Mining runs against a snapshot so peer messages are not blocked during RandomX work. The first node mines; the second is an observer (`none`) to avoid two local miners creating competing tips. Configure peers in both directions for resilient propagation.
 
 ## Current testnet-alpha limitations
-- Nodes maintain an in-memory transaction mempool, validate sender signatures/nonces/balances, include eligible pending transactions in mined blocks, and update balances/nonces when blocks are accepted. Pending transactions are removed after confirmation. The mempool is not persisted across restarts.
+- Nodes maintain a persistent local transaction mempool, validate sender signatures/nonces/balances, include eligible pending transactions in mined blocks, and update balances/nonces when blocks are accepted. Pending transactions are removed after confirmation and restored entries are revalidated at restart. Mempools are local node state, not consensus data.
 - Nodes validate full candidate chains from genesis and select by cumulative proof-of-work; equal-work ties use the smaller tip hash. Reorganizations replay blocks to rebuild balances/nonces. Displaced transactions are revalidated in the local mempool. This is a minimal testnet rule, not adversarially hardened consensus.
 - Difficulty starts at 8 bits and retargets every 10 completed blocks using the elapsed time across that window. Each retarget changes difficulty by at most one bit, with experimental bounds of 4–24 bits and a 30-second target interval. New blocks must have timestamps strictly greater than the median of up to the previous 11 block timestamps (median-time-past); miners choose a timestamp at least one second beyond both the previous tip and that median.
 - RandomX uses one fixed testnet seed; no epoch seed schedule exists.
-- The node protocol has no authentication, rate limits, peer discovery, message size limits, or DoS protection.
+- Peer messages use an optional shared ANA_PEER_TOKEN; without it, inbound connections are loopback-only. The node limits concurrent inbound connections, message size, and socket timeouts. The token is sent over plaintext TCP, so use a trusted private network or VPN. There is no TLS, peer identity system, rate limiting, or peer discovery.
 - The JSON-based consensus header encoding is deterministic for this Rust struct today but is not yet a formally versioned canonical wire format.
-- Wallet can query available balance and next nonce from a node before sending. The keystore is still unencrypted, and the mempool is not persisted.
+- Wallet keystores use Argon2id and XChaCha20-Poly1305 encryption, support legacy-key migration and encrypted backups, and can query a node for balance/nonce before sending. Transaction admission acknowledgements indicate mempool acceptance, not block confirmation.
+- Transaction status is node-local. Confirmations count the inclusion block as 1 and may decrease to zero after a chain reorganization; this prototype has no deterministic finality.
 - Do not use for real funds. This is not mainnet-ready software.
 
 

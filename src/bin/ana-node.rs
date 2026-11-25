@@ -35,6 +35,8 @@ struct Message {
     #[serde(default)]
     confirmed_height: Option<u64>,
     #[serde(default)]
+    confirmations: Option<u64>,
+    #[serde(default)]
     node_status: Option<NodeStatus>,
 }
 
@@ -81,6 +83,7 @@ fn authenticated_wire(message: &Message) -> Result<Vec<u8>> {
             transaction_id: message.transaction_id.clone(),
             transaction_state: message.transaction_state.clone(),
             confirmed_height: message.confirmed_height,
+            confirmations: message.confirmations,
             node_status: message.node_status.clone(),
         },
         auth: peer_token(),
@@ -175,7 +178,7 @@ fn transaction_ack(id: &str, state: &str) -> Message {
     Message {
         kind: "transaction_result".into(), transaction: None, block: None, blocks: None,
         address: None, balance: None, nonce: None, transaction_id: Some(id.to_owned()),
-        transaction_state: Some(state.to_owned()), confirmed_height: None, node_status: None,
+        transaction_state: Some(state.to_owned()), confirmed_height: None, confirmations: None, node_status: None,
     }
 }
 
@@ -241,6 +244,10 @@ fn transaction_status(blocks: &[Block], pool: &Mempool, id: &str) -> (String, Op
     ("not_found".into(), None)
 }
 
+fn confirmation_count(tip_height: u64, confirmed_height: u64) -> Option<u64> {
+    tip_height.checked_sub(confirmed_height)?.checked_add(1)
+}
+
 fn handle(
     mut stream: TcpStream,
     chain: SharedChain,
@@ -286,7 +293,7 @@ fn handle(
                 response(&mut stream, &Message {
                     kind: "blocks".into(), transaction: None, block: None,
                     blocks: Some(state.blocks.clone()), address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
                 });
             }
         }
@@ -298,7 +305,7 @@ fn handle(
                             kind: "account".into(), transaction: None, block: None, blocks: None,
                             address: Some(address.clone()), balance: Some(ledger.balance(&address)),
                             nonce: Some(ledger.nonce(&address)),
-                            transaction_id: None, transaction_state: None, confirmed_height: None,
+                            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None,
                             node_status: None,
                         });
                     }
@@ -311,7 +318,7 @@ fn handle(
                 response(&mut stream, &Message {
                     kind: "node_status".into(), transaction: None, block: None, blocks: None,
                     address: None, balance: None, nonce: None,
-                    transaction_id: None, transaction_state: None, confirmed_height: None,
+                    transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None,
                     node_status: Some(NodeStatus {
                         network: ana_blockchain::NETWORK.into(),
                         height: tip.height,
@@ -326,11 +333,12 @@ fn handle(
             if let Some(id) = message.transaction_id {
                 if let Ok(state) = chain.lock() {
                     let (status, height) = transaction_status(&state.blocks, &pool, &id);
+                    let confirmations = height.and_then(|confirmed| confirmation_count(state.tip().height, confirmed));
                     response(&mut stream, &Message {
                         kind: "transaction_status".into(), transaction: None, block: None, blocks: None,
                         address: None, balance: None, nonce: None,
                         transaction_id: Some(id), transaction_state: Some(status),
-                        confirmed_height: height, node_status: None,
+                        confirmed_height: height, confirmations, node_status: None,
                     });
                 }
             }
@@ -366,7 +374,7 @@ fn handle(
                     broadcast(&peers, &Message {
                         kind: "get_chain".into(), transaction: None, block: None,
                         blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
                     });
                 }
             }
@@ -393,14 +401,14 @@ fn handle(
                     broadcast(&peers, &Message {
                         kind: "block".into(), transaction: None, block: Some(block),
                         blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
                     });
                 } else {
                     eprintln!("Block does not extend local tip; requesting peer chain");
                     broadcast(&peers, &Message {
                         kind: "get_chain".into(), transaction: None, block: None,
                         blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
                     });
                 }
             }
@@ -440,7 +448,7 @@ fn handle(
                 broadcast(&peers, &Message {
                     kind: "transaction".into(), transaction: Some(tx), block: None,
                     blocks: None, address: None, balance: None, nonce: None,
-                    transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+                    transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
                 });
             }
         }
@@ -482,7 +490,7 @@ fn main() -> Result<()> {
         send(peer, &Message {
             kind: "get_chain".into(), transaction: None, block: None,
             blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
         });
     }
 
@@ -519,7 +527,7 @@ fn main() -> Result<()> {
                         broadcast(&mining_peers, &Message {
                             kind: "block".into(), transaction: None, block: Some(block),
                             blocks: None, address: None, balance: None, nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
                         });
                     }
                 }
@@ -589,6 +597,13 @@ mod tests {
     }
 
     #[test]
+    fn confirmation_count_includes_inclusion_block_and_handles_invalid_height() {
+        assert_eq!(confirmation_count(12, 12), Some(1));
+        assert_eq!(confirmation_count(15, 12), Some(4));
+        assert_eq!(confirmation_count(11, 12), None);
+    }
+
+    #[test]
     fn pending_transactions_survive_restart_and_are_revalidated() {
         let sender = SigningKey::generate(&mut OsRng);
         let receiver = SigningKey::generate(&mut OsRng);
@@ -646,7 +661,7 @@ mod network_security_tests {
             address: None,
             balance: None,
             nonce: None,
-            transaction_id: None, transaction_state: None, confirmed_height: None, node_status: None,
+            transaction_id: None, transaction_state: None, confirmed_height: None, confirmations: None, node_status: None,
         };
         let envelope = AuthenticatedMessage {
             message,

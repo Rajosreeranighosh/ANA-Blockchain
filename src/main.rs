@@ -46,8 +46,7 @@ fn meets_target(hash: &[u8; 32], difficulty: u16) -> bool {
         return false;
     }
 
-    remaining_bits == 0
-        || (hash[full_zero_bytes] >> (8 - remaining_bits)) == 0
+    remaining_bits == 0 || (hash[full_zero_bytes] >> (8 - remaining_bits)) == 0
 }
 
 fn genesis() -> Block {
@@ -62,7 +61,10 @@ fn genesis() -> Block {
     // Genesis is a fixed bootstrap constant in this prototype. It is not mined.
     let bytes = serde_json::to_vec(&header).expect("genesis header serializes");
     let hash = Sha256::digest(bytes);
-    Block { header, hash: hex::encode(hash) }
+    Block {
+        header,
+        hash: hex::encode(hash),
+    }
 }
 
 fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
@@ -72,10 +74,9 @@ fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
 
     println!("Initializing RandomX light-mode cache (about 256 MiB)...");
     let flags = RandomxFlags::default();
-    let cache = RandomxCache::new(flags, DEV_RANDOMX_KEY)
-        .context("failed to initialize RandomX cache")?;
-    let vm = RandomxVm::new(flags, &cache)
-        .context("failed to initialize RandomX VM")?;
+    let cache =
+        RandomxCache::new(flags, DEV_RANDOMX_KEY).context("failed to initialize RandomX cache")?;
+    let vm = RandomxVm::new(flags, &cache).context("failed to initialize RandomX VM")?;
 
     let mut header = BlockHeader {
         height: previous.header.height + 1,
@@ -90,9 +91,14 @@ fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
         let input = header_bytes(&header)?;
         let hash = vm.hash(&input);
         if meets_target(&hash, difficulty) {
-            return Ok(Block { header, hash: hex::encode(hash) });
+            return Ok(Block {
+                header,
+                hash: hex::encode(hash),
+            });
         }
-        header.nonce = header.nonce.checked_add(1)
+        header.nonce = header
+            .nonce
+            .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("nonce overflow"))?;
     }
 }

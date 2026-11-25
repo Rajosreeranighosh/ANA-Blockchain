@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
-use randomx_bindings::{RandomxCache, RandomxFlags, RandomxVm};
+use randomx_rs::{RandomXCache, RandomXFlag, RandomXVM};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
@@ -499,13 +499,43 @@ fn meets_pow_target(hash: &[u8; 32], bits: u16) -> bool {
         && (remainder == 0 || (hash[bytes] >> (8 - remainder)) == 0)
 }
 
-fn randomx_hash(input: &[u8]) -> Result<[u8; 32]> {
-    let flags = RandomxFlags::default();
-    let cache = RandomxCache::new(flags, RANDOMX_SEED)
+fn randomx_vm_for_key(key: &[u8]) -> Result<RandomXVM> {
+    let flags = RandomXFlag::default();
+    let cache = RandomXCache::new(flags, key)
         .context("RandomX cache initialization failed")?;
-    let vm = RandomxVm::new(flags, &cache)
-        .context("RandomX VM initialization failed")?;
-    Ok(vm.hash(input))
+    RandomXVM::new(flags, Some(cache), None)
+        .context("RandomX VM initialization failed")
+}
+
+fn randomx_vm() -> Result<RandomXVM> {
+    randomx_vm_for_key(RANDOMX_SEED)
+}
+
+fn randomx_vm_hash(vm: &RandomXVM, input: &[u8]) -> Result<[u8; 32]> {
+    let digest = vm.calculate_hash(input)
+        .context("RandomX hash calculation failed")?;
+    digest.try_into()
+        .map_err(|_| anyhow::anyhow!("RandomX returned an invalid digest length"))
+}
+
+fn randomx_hash(input: &[u8]) -> Result<[u8; 32]> {
+    let vm = randomx_vm()?;
+    randomx_vm_hash(&vm, input)
+}
+
+#[cfg(test)]
+mod randomx_known_answer_tests {
+    use super::*;
+
+    #[test]
+    fn randomx_matches_upstream_known_answer() {
+        let vm = randomx_vm_for_key(b"test key 000").unwrap();
+        let digest = randomx_vm_hash(&vm, b"This is a test").unwrap();
+        assert_eq!(
+            hex::encode(digest),
+            "639183aae1bf4c9a35884cb46b09cad9175f04efd7684e7262a0ac1c2f0b4e3f"
+        );
+    }
 }
 
 pub fn block_hash(block: &Block) -> Result<String> {
@@ -681,13 +711,10 @@ impl ChainState {
             difficulty: expected_next_difficulty(&self.blocks)?,
             hash: String::new(),
         };
-        let flags = RandomxFlags::default();
-        let cache = RandomxCache::new(flags, RANDOMX_SEED)
-            .context("RandomX cache initialization failed")?;
-        let vm = RandomxVm::new(flags, &cache)
-            .context("RandomX VM initialization failed")?;
+        let vm = randomx_vm()?;
         loop {
-            let digest = vm.hash(&pow_input(&block)?);
+            let input = pow_input(&block)?;
+            let digest = randomx_vm_hash(&vm, &input)?;
             if meets_pow_target(&digest, block.difficulty) {
                 block.hash = hex::encode(digest);
                 return Ok(block);

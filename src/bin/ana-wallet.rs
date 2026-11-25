@@ -1,4 +1,4 @@
-use ana_blockchain::{address, open_wallet, parse_amount, sign, Transaction};
+use ana_blockchain::{address, open_encrypted_wallet, parse_amount, sign, Transaction};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,26 +11,19 @@ use std::{
 #[derive(Serialize, Deserialize)]
 struct Message {
     kind: String,
-    #[serde(default)]
-    transaction: Option<Transaction>,
-    #[serde(default)]
-    address: Option<String>,
-    #[serde(default)]
-    balance: Option<u64>,
-    #[serde(default)]
-    nonce: Option<u64>,
-    #[serde(default)]
-    block: Option<serde_json::Value>,
-    #[serde(default)]
-    blocks: Option<Vec<serde_json::Value>>,
+    #[serde(default)] transaction: Option<Transaction>,
+    #[serde(default)] address: Option<String>,
+    #[serde(default)] balance: Option<u64>,
+    #[serde(default)] nonce: Option<u64>,
+    #[serde(default)] block: Option<serde_json::Value>,
+    #[serde(default)] blocks: Option<Vec<serde_json::Value>>,
 }
 
 fn account(node: &str, address: &str) -> Result<(u64, u64)> {
     let mut stream = TcpStream::connect(node).context("could not connect to ANA node")?;
     let request = serde_json::to_string(&Message {
-        kind: "get_account".into(), transaction: None,
-        address: Some(address.into()), balance: None, nonce: None,
-        block: None, blocks: None,
+        kind: "get_account".into(), transaction: None, address: Some(address.into()),
+        balance: None, nonce: None, block: None, blocks: None,
     })? + "\n";
     stream.write_all(request.as_bytes())?;
     let mut line = String::new();
@@ -43,11 +36,16 @@ fn account(node: &str, address: &str) -> Result<(u64, u64)> {
 fn submit(node: &str, tx: Transaction) -> Result<()> {
     let mut stream = TcpStream::connect(node).context("could not connect to ANA node")?;
     let wire = serde_json::to_string(&Message {
-        kind: "transaction".into(), transaction: Some(tx),
-        address: None, balance: None, nonce: None, block: None, blocks: None,
+        kind: "transaction".into(), transaction: Some(tx), address: None,
+        balance: None, nonce: None, block: None, blocks: None,
     })? + "\n";
     stream.write_all(wire.as_bytes())?;
     Ok(())
+}
+
+fn unlock(path: &str) -> Result<ed25519_dalek::SigningKey> {
+    let passphrase = rpassword::prompt_password("Wallet passphrase: ")?;
+    open_encrypted_wallet(Path::new(path), passphrase.as_bytes())
 }
 
 fn main() -> Result<()> {
@@ -55,12 +53,16 @@ fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("new") => {
             let path = args.get(2).map(String::as_str).unwrap_or("ana-wallet.json");
-            println!("New ANA address: {}", ana_blockchain::create_wallet(Path::new(path))?);
-            println!("Keep the wallet file private and backed up.");
+            let pass = rpassword::prompt_password("Create wallet passphrase (12+ characters): ")?;
+            let confirm = rpassword::prompt_password("Confirm passphrase: ")?;
+            if pass != confirm { bail!("passphrases do not match"); }
+            let addr = ana_blockchain::create_encrypted_wallet(Path::new(path), pass.as_bytes())?;
+            println!("New ANA address: {addr}");
+            println!("Wallet encrypted. Back up this file and keep the passphrase separately.");
         }
         Some("address") => {
             let path = args.get(2).map(String::as_str).unwrap_or("ana-wallet.json");
-            println!("{}", address(&open_wallet(Path::new(path))?.verifying_key()));
+            println!("{}", address(&unlock(path)?.verifying_key()));
         }
         Some("balance") => {
             if args.len() != 4 { bail!("Usage: ana-wallet balance <address> <node-ip:port>"); }
@@ -69,17 +71,13 @@ fn main() -> Result<()> {
             println!("Next nonce: {nonce}");
         }
         Some("send") => {
-            if args.len() != 7 {
-                bail!("Usage: ana-wallet send <wallet-file> <recipient> <amount-ANA> <fee-ANA> <node-ip:port>");
-            }
-            let key = open_wallet(Path::new(&args[2]))?;
+            if args.len() != 7 { bail!("Usage: ana-wallet send <wallet-file> <recipient> <amount-ANA> <fee-ANA> <node-ip:port>"); }
+            let key = unlock(&args[2])?;
             let from = address(&key.verifying_key());
             let (balance, nonce) = account(&args[6], &from)?;
             let amount = parse_amount(&args[4])?;
             let fee = parse_amount(&args[5])?;
-            if balance < amount.checked_add(fee).context("amount overflow")? {
-                bail!("insufficient available balance");
-            }
+            if balance < amount.checked_add(fee).context("amount overflow")? { bail!("insufficient available balance"); }
             let tx = sign(&key, args[3].clone(), amount, fee, nonce)?;
             let id = tx.id()?;
             submit(&args[6], tx)?;

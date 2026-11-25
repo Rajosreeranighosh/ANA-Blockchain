@@ -21,7 +21,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-## Create a miner wallet
+## Create an encrypted miner wallet
 ```sh
 cargo run --release --bin ana-wallet -- new miner.json
 cargo run --release --bin ana-wallet -- address miner.json
@@ -78,3 +78,9 @@ Each node stores pending transactions in a sibling file named `<chain-data-file>
 The node limits inbound work to 64 concurrent connections, caps each newline-delimited JSON message at 8 MiB, and applies 10-second socket read/write timeouts and outbound connect timeouts. Malformed, incomplete, oversized, and unauthenticated messages are rejected.
 
 For nodes communicating across machines, set the same high-entropy `ANA_PEER_TOKEN` environment variable on every node before starting it. The token is sent as a shared bearer secret over the existing TCP transport. **This transport is not encrypted**: use a trusted private network or VPN, and do not expose the peer port to the public internet without a TLS/VPN layer. If the token is unset, inbound connections are accepted only from loopback addresses, so remote peers cannot connect. These controls reduce basic resource abuse but do not replace TLS, rate limiting, authenticated key identities, or protocol-level sync pagination.
+
+
+## Wallet security v1 (experimental)
+New wallets created by `ana-wallet new` are encrypted at rest with Argon2id key derivation and XChaCha20-Poly1305 authenticated encryption. The CLI prompts for the passphrase without echoing it; passphrases must be at least 12 characters. The wallet file is written atomically and restricted to owner read/write permissions on Unix. The passphrase is never stored in the file or accepted as a command-line argument.
+
+**Back up the encrypted wallet file and store the passphrase separately.** Losing either means losing access; there is no password reset or recovery service. Anyone who obtains both can spend the wallet. Keep backups offline and never upload wallet files or passphrases to GitHub. Existing plaintext wallet files from earlier versions are not automatically imported by this CLI; preserve them securely until a separately reviewed migration tool exists. This is experimental software, not audited custody software.

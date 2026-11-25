@@ -1,5 +1,5 @@
 use ana_blockchain::{validate_address, Block, ChainState, Ledger, Transaction};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},

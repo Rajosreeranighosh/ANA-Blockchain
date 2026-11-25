@@ -650,6 +650,9 @@ mod tests {
 #[cfg(test)]
 mod network_security_tests {
     use super::*;
+    use ana_blockchain::{address, sign, COIN};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
 
     #[test]
     fn authenticated_envelope_round_trips_message_and_token_field() {

@@ -6,7 +6,9 @@
 - Testnet RandomX key: ANA-TESTNET-RANDOMX-SEED-v1
 - Fixed testnet difficulty: 8 leading zero bits
 - Maximum supply target: 21,000,000 ANA
-- Block subsidy: up to 50 ANA per block
+- Block subsidy: up to 50 ANA per block, clamped to remaining supply at the 21,000,000 ANA cap
+- Genesis premine: none; the genesis ledger starts with zero minted ANA
+- Transaction fees: debited from senders and credited to the block miner; fees do not count as newly minted supply
 - Atomic units: 100,000,000 per ANA
 
 These parameters are experimental and must not be reused for a public mainnet without a formal consensus specification and security review.
@@ -51,3 +53,15 @@ The nodes request the peer chain at startup, validate received blocks, compare c
 Each non-genesis block contributes work equal to 2^difficulty. Nodes validate a candidate chain from the fixed genesis before replacing local state. Greater cumulative work wins; equal-work chains use the lexicographically smaller hexadecimal tip hash as a deterministic tie-break. Balances, nonces, and minted supply are rebuilt by replaying the selected chain. Transactions found only on a displaced branch are returned to the local mempool and revalidated.
 
 This is a minimal testnet rule. Fixed difficulty, unauthenticated peers, unbounded chain messages, and the absence of checkpoints/finality mean it is not safe for public adversarial deployment.
+
+## Block rewards and supply accounting
+
+For every accepted non-genesis block, consensus derives the miner subsidy from the ledger state immediately before that block:
+
+`subsidy = min(50 ANA, 21,000,000 ANA - total_minted)`
+
+The subsidy is credited to the block's `miner` address and added to the ledger's `minted` counter atomically with the block's transactions. The block's miner address is part of the RandomX proof-of-work input, so changing the reward recipient changes the block hash. Transaction fees are transferred from senders to the miner in addition to the subsidy; fees are transfers, not new issuance. Once the supply cap is reached, later blocks receive no subsidy, though valid transaction fees can still be collected.
+
+There is no genesis premine. The genesis block is a fixed bootstrap block and the initial ledger has zero minted supply. Every node independently recomputes subsidy and fees while validating/replaying blocks, including during chain synchronization and reorganization. A block that would overflow balances or exceed the supply cap is rejected without partially changing ledger state.
+
+The implementation uses an implicit protocol-defined block subsidy rather than a user-supplied coinbase transaction, preventing miners from choosing an arbitrary mint amount. This is still experimental testnet consensus and has not received an independent security audit.

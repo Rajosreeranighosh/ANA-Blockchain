@@ -16,8 +16,8 @@ if (-not $matches) {
     throw "randomx-bindings-sys 0.1.5 CMakeLists.txt was not found. Run cargo fetch first."
 }
 
-$old = 'COMMAND powershell -ExecutionPolicy Bypass -File h2inc.ps1 ..\src\configuration.h > ..\src\asm\configuration.asm SET ERRORLEVEL = 0'
-$new = 'COMMAND powershell -NoProfile -ExecutionPolicy Bypass -Command "& { .\h2inc.ps1 ..\src\configuration.h | Out-File -Encoding ascii ..\src\asm\configuration.asm }"'
+$old = 'COMMAND powershell -ExecutionPolicy Bypass -File h2inc.ps1 ..\\src\\configuration.h > ..\\src\\asm\\configuration.asm SET ERRORLEVEL = 0'
+$new = 'COMMAND powershell -NoProfile -ExecutionPolicy Bypass -Command "& { .\\h2inc.ps1 ..\\src\\configuration.h | Out-File -Encoding ascii ..\\src\\asm\\configuration.asm }"'
 
 foreach ($file in $matches) {
     $content = Get-Content -LiteralPath $file.FullName -Raw

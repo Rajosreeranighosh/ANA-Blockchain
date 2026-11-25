@@ -698,7 +698,7 @@ mod network_security_tests {
         let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
         let active = Arc::new(AtomicUsize::new(0));
-        let data_file = temp_file("tcp-status");
+        let data_file = std::env::temp_dir().join(format!("ana-tcp-status-{}.json", std::process::id()));
 
         let server_chain = chain.clone();
         let server_peers = peers.clone();

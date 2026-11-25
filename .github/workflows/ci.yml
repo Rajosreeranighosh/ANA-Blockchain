@@ -24,7 +24,7 @@ jobs:
           sudo mkdir -p /usr/local/lib
           sudo ln -sf "$GNU_CXX_RUNTIME" /usr/local/lib/liblibc++.so
       - name: Format Rust sources
-        run: cargo fmt --all
+        run: cargo fmt --all -- --check
       - name: Compile and test all targets
         env:
           CMAKE_POLICY_VERSION_MINIMUM: '3.5'

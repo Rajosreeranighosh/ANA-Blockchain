@@ -1,14 +1,17 @@
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
+use randomx_bindings::{RandomxCache, RandomxFlags, RandomxVm};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
 
 pub const COIN: u64 = 100_000_000;
 pub const MAX_SUPPLY: u64 = 21_000_000 * COIN;
 pub const BLOCK_REWARD: u64 = 50 * COIN;
 pub const NETWORK: &str = "ANA-TESTNET-1";
+pub const TESTNET_DIFFICULTY: u16 = 8;
+pub const RANDOMX_SEED: &[u8] = b"ANA-TESTNET-RANDOMX-SEED-v1";
 
 /// Parse a human ANA amount without floating-point rounding.
 pub fn parse_amount(input: &str) -> Result<u64> {
@@ -183,6 +186,7 @@ pub struct Block {
     pub miner: String,
     pub transactions: Vec<Transaction>,
     pub nonce: u64,
+    pub difficulty: u16,
     pub hash: String,
 }
 
@@ -285,6 +289,7 @@ mod tests {
             miner: address(&k.verifying_key()),
             transactions: vec![],
             nonce: 0,
+            difficulty: TESTNET_DIFFICULTY,
             hash: String::new(),
         };
         l.apply_block(&b).unwrap();
@@ -325,5 +330,175 @@ mod tests {
         assert_eq!(parse_amount("12.34000000").unwrap(), 1_234_000_000);
         assert!(parse_amount("0.000000001").is_err());
         assert!(parse_amount("1e-3").is_err());
+    }
+}
+
+
+#[derive(Serialize)]
+struct PowHeader<'a> {
+    network: &'a str,
+    height: u64,
+    previous: &'a str,
+    timestamp: u64,
+    miner: &'a str,
+    transactions: &'a [Transaction],
+    nonce: u64,
+    difficulty: u16,
+}
+
+fn pow_input(block: &Block) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&PowHeader {
+        network: NETWORK,
+        height: block.height,
+        previous: &block.previous,
+        timestamp: block.timestamp,
+        miner: &block.miner,
+        transactions: &block.transactions,
+        nonce: block.nonce,
+        difficulty: block.difficulty,
+    })?)
+}
+
+fn meets_pow_target(hash: &[u8; 32], bits: u16) -> bool {
+    let bytes = (bits / 8) as usize;
+    let remainder = (bits % 8) as u8;
+    hash.iter().take(bytes).all(|b| *b == 0)
+        && (remainder == 0 || (hash[bytes] >> (8 - remainder)) == 0)
+}
+
+fn randomx_hash(input: &[u8]) -> Result<[u8; 32]> {
+    let flags = RandomxFlags::default();
+    let cache = RandomxCache::new(flags, RANDOMX_SEED)
+        .context("RandomX cache initialization failed")?;
+    let vm = RandomxVm::new(flags, &cache)
+        .context("RandomX VM initialization failed")?;
+    Ok(vm.hash(input))
+}
+
+pub fn block_hash(block: &Block) -> Result<String> {
+    Ok(hex::encode(randomx_hash(&pow_input(block)?)?))
+}
+
+pub fn genesis_block() -> Block {
+    let digest = Sha256::digest(b"ANA-TESTNET-1:GENESIS:v1");
+    Block {
+        height: 0,
+        previous: "0".repeat(64),
+        timestamp: 1_764_096_000,
+        miner: "ana1".to_owned() + &"0".repeat(64),
+        transactions: Vec::new(),
+        nonce: 0,
+        difficulty: 0,
+        hash: hex::encode(digest),
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ChainState {
+    pub blocks: Vec<Block>,
+    pub ledger: Ledger,
+}
+
+impl Default for ChainState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChainState {
+    pub fn new() -> Self {
+        Self { blocks: vec![genesis_block()], ledger: Ledger::default() }
+    }
+
+    pub fn tip(&self) -> &Block {
+        self.blocks.last().expect("chain always contains genesis")
+    }
+
+    pub fn append(&mut self, block: Block) -> Result<()> {
+        let previous = self.tip();
+        if block.height != previous.height.checked_add(1).context("height overflow")? {
+            bail!("incorrect block height");
+        }
+        if block.previous != previous.hash {
+            bail!("previous block hash mismatch");
+        }
+        if block.timestamp < previous.timestamp {
+            bail!("block timestamp moved backwards");
+        }
+        if block.difficulty != TESTNET_DIFFICULTY {
+            bail!("unexpected testnet difficulty");
+        }
+        validate_address(&block.miner)?;
+        let actual = block_hash(&block)?;
+        if actual != block.hash {
+            bail!("block RandomX hash mismatch");
+        }
+        let raw: [u8; 32] = hex::decode(&actual)?.try_into()
+            .map_err(|_| anyhow::anyhow!("invalid RandomX digest"))?;
+        if !meets_pow_target(&raw, block.difficulty) {
+            bail!("block does not meet proof-of-work target");
+        }
+        let mut candidate_ledger = self.ledger.clone();
+        candidate_ledger.apply_block(&block)?;
+        self.ledger = candidate_ledger;
+        self.blocks.push(block);
+        Ok(())
+    }
+
+    pub fn mine_next(&self, miner: String) -> Result<Block> {
+        validate_address(&miner)?;
+        let previous = self.tip();
+        let height = previous.height.checked_add(1).context("height overflow")?;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
+            .max(previous.timestamp);
+        let mut block = Block {
+            height,
+            previous: previous.hash.clone(),
+            timestamp,
+            miner,
+            transactions: Vec::new(),
+            nonce: 0,
+            difficulty: TESTNET_DIFFICULTY,
+            hash: String::new(),
+        };
+        loop {
+            let digest = randomx_hash(&pow_input(&block)?)?;
+            if meets_pow_target(&digest, block.difficulty) {
+                block.hash = hex::encode(digest);
+                return Ok(block);
+            }
+            block.nonce = block.nonce.checked_add(1).context("nonce overflow")?;
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let temp = path.with_extension("tmp");
+        fs::write(&temp, serde_json::to_vec(self)?)?;
+        fs::rename(temp, path)?;
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+        let state: Self = serde_json::from_slice(&fs::read(path)?)?;
+        if state.blocks.is_empty() || state.blocks[0].hash != genesis_block().hash {
+            bail!("stored chain has an unknown genesis");
+        }
+        let mut rebuilt = Self::new();
+        for block in state.blocks.iter().skip(1) {
+            rebuilt.append(block.clone())?;
+        }
+        if rebuilt.ledger.minted != state.ledger.minted
+            || rebuilt.ledger.balances != state.ledger.balances
+            || rebuilt.ledger.nonces != state.ledger.nonces
+        {
+            bail!("stored ledger does not match validated blocks");
+        }
+        Ok(rebuilt)
     }
 }

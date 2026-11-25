@@ -147,15 +147,31 @@ fn handle(
         }
         "blocks" => {
             if let Some(blocks) = message.blocks {
-                let mut changed = false;
-                if let Ok(mut state) = chain.lock() {
-                    for block in blocks {
-                        if state.append(block).is_ok() { changed = true; }
+                let (changed, displaced) = if let Ok(mut state) = chain.lock() {
+                    let old_blocks = state.blocks.clone();
+                    match state.replace_if_more_work(blocks) {
+                        Ok(true) => {
+                            let canonical: HashSet<String> = state.blocks.iter()
+                                .flat_map(|b| b.transactions.iter())
+                                .filter_map(|tx| tx.id().ok()).collect();
+                            let displaced: Vec<Transaction> = old_blocks.iter()
+                                .flat_map(|b| b.transactions.iter().cloned())
+                                .filter(|tx| tx.id().map(|id| !canonical.contains(&id)).unwrap_or(false))
+                                .collect();
+                            (true, displaced)
+                        }
+                        Ok(false) => (false, Vec::new()),
+                        Err(error) => { eprintln!("Rejected candidate chain: {error}"); (false, Vec::new()) }
                     }
-                }
+                } else { (false, Vec::new()) };
                 if changed {
+                    if let Ok(mut values) = pool.lock() {
+                        for tx in displaced { if let Ok(id) = tx.id() { values.insert(id, tx); } }
+                    }
                     prune_mempool(&chain, &pool);
                     persist(&chain, &data_file);
+                    println!("Switched to higher-work chain at height {}",
+                        chain.lock().map(|s| s.tip().height).unwrap_or(0));
                     broadcast(&peers, &Message {
                         kind: "get_chain".into(), transaction: None, block: None,
                         blocks: None, address: None, balance: None, nonce: None,
@@ -168,9 +184,10 @@ fn handle(
                 let id = block.hash.clone();
                 let first_seen = seen.lock().map(|mut values| values.insert(id)).unwrap_or(false);
                 if !first_seen { return; }
-                let accepted = chain.lock()
-                    .map(|mut state| state.append(block.clone()).is_ok()).unwrap_or(false);
-                if accepted {
+                let result = chain.lock()
+                    .map_err(|_| anyhow::anyhow!("chain lock poisoned"))
+                    .and_then(|mut state| state.append(block.clone()));
+                if result.is_ok() {
                     println!("Confirmed block #{} with {} transaction(s)",
                         block.height, block.transactions.len());
                     if let Ok(mut values) = pool.lock() {
@@ -185,7 +202,11 @@ fn handle(
                         blocks: None, address: None, balance: None, nonce: None,
                     });
                 } else {
-                    eprintln!("Rejected invalid, stale, or non-extending block");
+                    eprintln!("Block does not extend local tip; requesting peer chain");
+                    broadcast(&peers, &Message {
+                        kind: "get_chain".into(), transaction: None, block: None,
+                        blocks: None, address: None, balance: None, nonce: None,
+                    });
                 }
             }
         }
@@ -260,9 +281,12 @@ fn main() -> Result<()> {
             let transactions = mining_chain.lock()
                 .map(|state| select_transactions(&state, &mining_pool))
                 .unwrap_or_default();
-            let result = mining_chain.lock()
-                .map_err(|_| anyhow::anyhow!("chain lock poisoned"))
-                .and_then(|state| state.mine_next_with_transactions(miner_address.clone(), transactions));
+            // Mine against a snapshot without holding the chain mutex during RandomX.
+            let snapshot = match mining_chain.lock() {
+                Ok(state) => state.clone(),
+                Err(_) => { thread::sleep(Duration::from_secs(1)); continue; }
+            };
+            let result = snapshot.mine_next_with_transactions(miner_address.clone(), transactions);
             match result {
                 Ok(block) => {
                     let accepted = mining_chain.lock()

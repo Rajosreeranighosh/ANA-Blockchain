@@ -415,6 +415,31 @@ impl ChainState {
         self.blocks.last().expect("chain always contains genesis")
     }
 
+    /// Compare a fully validated candidate chain using cumulative proof-of-work.
+    /// Equal-work ties use the lexicographically smaller tip hash for convergence.
+    pub fn replace_if_more_work(&mut self, blocks: Vec<Block>) -> Result<bool> {
+        let expected_genesis = genesis_block();
+        let supplied_genesis = blocks.first().context("candidate chain is empty")?;
+        if serde_json::to_vec(supplied_genesis)? != serde_json::to_vec(&expected_genesis)? {
+            bail!("candidate chain has an unknown genesis");
+        }
+        let mut candidate = Self::new();
+        for block in blocks.into_iter().skip(1) { candidate.append(block)?; }
+        let candidate_work = candidate.cumulative_work()?;
+        let current_work = self.cumulative_work()?;
+        let wins_tie = candidate_work == current_work && candidate.tip().hash < self.tip().hash;
+        if candidate_work > current_work || wins_tie { *self = candidate; return Ok(true); }
+        Ok(false)
+    }
+
+    /// Sum per-block work (2^difficulty); checked to prevent accumulator overflow.
+    pub fn cumulative_work(&self) -> Result<u128> {
+        self.blocks.iter().skip(1).try_fold(0u128, |total, block| {
+            let work = 1u128.checked_shl(u32::from(block.difficulty))
+                .context("block difficulty exceeds work accumulator")?;
+            total.checked_add(work).context("cumulative chain work overflow")
+        })
+    }
     pub fn append(&mut self, block: Block) -> Result<()> {
         let previous = self.tip();
         if block.height != previous.height.checked_add(1).context("height overflow")? {

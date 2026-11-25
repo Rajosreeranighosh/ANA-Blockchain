@@ -34,14 +34,20 @@ Start a second node in another terminal:
 ```sh
 cargo run --release --bin ana-node -- 127.0.0.1:19002 node-b.json none 127.0.0.1:19001
 ```
-The nodes request the peer chain at startup, validate received blocks, persist accepted state, and gossip new blocks. The first node mines; the second is an observer (`none`) to avoid two local miners creating competing tips. Configure peers in both directions for resilient propagation.
+The nodes request the peer chain at startup, validate received blocks, compare cumulative work, reorganize to a higher-work valid chain, persist accepted state, and gossip new blocks. Mining runs against a snapshot so peer messages are not blocked during RandomX work. The first node mines; the second is an observer (`none`) to avoid two local miners creating competing tips. Configure peers in both directions for resilient propagation.
 
 ## Current testnet-alpha limitations
 - Nodes maintain an in-memory transaction mempool, validate sender signatures/nonces/balances, include eligible pending transactions in mined blocks, and update balances/nonces when blocks are accepted. Pending transactions are removed after confirmation. The mempool is not persisted across restarts.
-- Chain selection is append-only: no fork choice, reorganization, cumulative-work comparison, or robust adversarial sync.
+- Nodes validate full candidate chains from genesis and select by cumulative proof-of-work; equal-work ties use the smaller tip hash. Reorganizations replay blocks to rebuild balances/nonces. Displaced transactions are revalidated in the local mempool. This is a minimal testnet rule, not adversarially hardened consensus.
 - Difficulty is fixed at 8 bits and is only suitable for local experimentation.
 - RandomX uses one fixed testnet seed; no epoch seed schedule exists.
 - The node protocol has no authentication, rate limits, peer discovery, message size limits, or DoS protection.
 - The JSON-based consensus header encoding is deterministic for this Rust struct today but is not yet a formally versioned canonical wire format.
 - Wallet can query available balance and next nonce from a node before sending. The keystore is still unencrypted, and the mempool is not persisted.
 - Do not use for real funds. This is not mainnet-ready software.
+
+
+## Fork choice and reorganization (testnet alpha)
+Each non-genesis block contributes work equal to 2^difficulty. Nodes validate a candidate chain from the fixed genesis before replacing local state. Greater cumulative work wins; equal-work chains use the lexicographically smaller hexadecimal tip hash as a deterministic tie-break. Balances, nonces, and minted supply are rebuilt by replaying the selected chain. Transactions found only on a displaced branch are returned to the local mempool and revalidated.
+
+This is a minimal testnet rule. Fixed difficulty, unauthenticated peers, unbounded chain messages, and the absence of checkpoints/finality mean it is not safe for public adversarial deployment.

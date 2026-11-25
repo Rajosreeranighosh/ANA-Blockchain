@@ -1,10 +1,14 @@
 use ana_blockchain::{parse_amount, rpc::NodeClient, Wallet};
 use eframe::egui;
-use std::{path::Path,};
+use std::{fs, path::{Path, PathBuf}};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum Page { Overview, Send, Receive, Transactions, Settings }
+enum Page { Overview, Send, Receive, Transactions, Contacts, Settings }
+
+#[derive(Clone, Serialize, Deserialize)]
+struct AddressBookEntry { label: String, address: String }
 
 struct AnaWalletApp {
     page: Page,
@@ -32,6 +36,9 @@ struct AnaWalletApp {
     history_next_index: usize,
     history_has_more: bool,
     history_limit: usize,
+    contacts: Vec<AddressBookEntry>,
+    contact_label: String,
+    contact_address: String,
 }
 
 impl Default for AnaWalletApp {
@@ -62,11 +69,67 @@ impl Default for AnaWalletApp {
             history_next_index: 0,
             history_has_more: false,
             history_limit: 100,
+            contacts: Vec::new(),
+            contact_label: String::new(),
+            contact_address: String::new(),
         }
     }
 }
 
 impl AnaWalletApp {
+
+    fn address_book_path() -> PathBuf { PathBuf::from("ana-address-book.json") }
+
+    fn load_address_book(&mut self) {
+        let path = Self::address_book_path();
+        if !path.exists() { self.contacts.clear(); return; }
+        match fs::read(&path).and_then(|bytes| serde_json::from_slice::<Vec<AddressBookEntry>>(&bytes).map_err(std::io::Error::other)) {
+            Ok(entries) => {
+                self.contacts = entries.into_iter()
+                    .filter(|entry| !entry.label.trim().is_empty() && ana_blockchain::validate_address(&entry.address).is_ok())
+                    .take(500).collect();
+            }
+            Err(error) => self.message = format!("Could not load address book: {error}"),
+        }
+    }
+
+    fn save_address_book(&mut self) {
+        let path = Self::address_book_path();
+        let temp = path.with_extension("json.tmp");
+        let result = serde_json::to_vec_pretty(&self.contacts)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| fs::write(&temp, bytes))
+            .and_then(|_| fs::rename(&temp, &path));
+        match result {
+            Ok(()) => self.message = "Address book saved locally.".into(),
+            Err(error) => self.message = format!("Could not save address book: {error}"),
+        }
+    }
+
+    fn add_contact(&mut self) {
+        let label = self.contact_label.trim();
+        let address = self.contact_address.trim();
+        if label.is_empty() || label.len() > 64 {
+            self.message = "Contact label must contain 1–64 characters.".into();
+            return;
+        }
+        if ana_blockchain::validate_address(address).is_err() {
+            self.message = "Enter a valid ANA address.".into();
+            return;
+        }
+        if let Some(existing) = self.contacts.iter_mut().find(|entry| entry.address == address) {
+            existing.label = label.to_owned();
+        } else if self.contacts.len() < 500 {
+            self.contacts.push(AddressBookEntry { label: label.to_owned(), address: address.to_owned() });
+        } else {
+            self.message = "Address book limit reached (500 contacts).".into();
+            return;
+        }
+        self.contact_label.clear();
+        self.contact_address.clear();
+        self.save_address_book();
+    }
+
     fn unlock(&mut self) {
         let result = Wallet::open(Path::new(&self.wallet_path), self.passphrase.as_bytes());
         self.passphrase.zeroize();
@@ -78,6 +141,7 @@ impl AnaWalletApp {
                 self.balance = None;
                 self.nonce = None;
                 self.qr_texture = None;
+                self.load_address_book();
             }
             Err(error) => self.message = format!("Could not open wallet: {error:#}"),
         }
@@ -103,6 +167,7 @@ impl AnaWalletApp {
                 self.address = address;
                 self.wallet = Some(wallet);
                 self.qr_texture = None;
+                self.load_address_book();
                 self.message = "Encrypted wallet created. Back up the wallet file and store its passphrase separately.".into();
             }
             (Err(error), _) => self.message = format!("Could not create wallet: {error:#}"),
@@ -260,7 +325,7 @@ impl eframe::App for AnaWalletApp {
             ui.add_space(10.0);
             for (page, label) in [
                 (Page::Overview, "Overview"), (Page::Send, "Send"), (Page::Receive, "Receive"),
-                (Page::Transactions, "Transactions"), (Page::Settings, "Settings"),
+                (Page::Transactions, "Transactions"), (Page::Contacts, "Address book"), (Page::Settings, "Settings"),
             ] {
                 if ui.selectable_label(self.page == page, label).clicked() { self.page = page; }
             }
@@ -365,6 +430,33 @@ impl eframe::App for AnaWalletApp {
                         ui.text_edit_singleline(&mut self.transaction_id);
                         if ui.button("Check transaction").clicked() { self.check_transaction(); }
                         if !self.transaction_state.is_empty() { ui.label(&self.transaction_state); }
+                    }
+                    Page::Contacts => {
+                        ui.heading("Address book");
+                        ui.label("Contacts are stored locally in ana-address-book.json. They are not encrypted.");
+                        ui.label("Contact label");
+                        ui.text_edit_singleline(&mut self.contact_label);
+                        ui.label("ANA address");
+                        ui.text_edit_singleline(&mut self.contact_address);
+                        if ui.button("Add / update contact").clicked() { self.add_contact(); }
+                        ui.separator();
+                        let contacts = self.contacts.clone();
+                        for contact in contacts {
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.strong(&contact.label);
+                                    ui.small(&contact.address);
+                                });
+                                if ui.button("Use for send").clicked() {
+                                    self.recipient = contact.address.clone();
+                                    self.page = Page::Send;
+                                }
+                                if ui.button("Remove").clicked() {
+                                    self.contacts.retain(|entry| entry.address != contact.address);
+                                    self.save_address_book();
+                                }
+                            });
+                        }
                     }
                     Page::Settings => {
                         ui.heading("Settings");

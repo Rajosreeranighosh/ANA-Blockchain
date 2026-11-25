@@ -731,6 +731,109 @@ mod network_security_tests {
     }
 
     #[test]
+    fn signed_transaction_propagates_between_two_tcp_nodes() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let receiver_address = address(&receiver.verifying_key());
+        let tx = sign(&sender, receiver_address, COIN, 1, 0).unwrap();
+        let tx_id = tx.id().unwrap();
+
+        // Start node B as a real TCP listener with the same initial ledger.
+        let listener_b = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address_b = listener_b.local_addr().unwrap();
+        let mut chain_b_state = ChainState::new();
+        chain_b_state.ledger.balances.insert(sender_address.clone(), 5 * COIN);
+        let chain_b: SharedChain = Arc::new(Mutex::new(chain_b_state));
+        let pool_b: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        let active_b = Arc::new(AtomicUsize::new(0));
+        let data_b = std::env::temp_dir().join(format!("ana-two-node-b-{}.json", std::process::id()));
+        let b_chain = chain_b.clone();
+        let b_pool = pool_b.clone();
+        let b_active = active_b.clone();
+        let b_data = data_b.clone();
+        let server_b = thread::spawn(move || {
+            let (stream, _) = listener_b.accept().unwrap();
+            handle(
+                stream,
+                b_chain,
+                Arc::new(Vec::new()),
+                Arc::new(Mutex::new(HashSet::new())),
+                b_pool,
+                b_data,
+                b_active,
+            );
+        });
+
+        // Node A accepts the transaction and gossips it to node B.
+        let listener_a = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address_a = listener_a.local_addr().unwrap();
+        let mut chain_a_state = ChainState::new();
+        chain_a_state.ledger.balances.insert(sender_address, 5 * COIN);
+        let chain_a: SharedChain = Arc::new(Mutex::new(chain_a_state));
+        let pool_a: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        let active_a = Arc::new(AtomicUsize::new(0));
+        let data_a = std::env::temp_dir().join(format!("ana-two-node-a-{}.json", std::process::id()));
+        let a_chain = chain_a.clone();
+        let a_pool = pool_a.clone();
+        let a_active = active_a.clone();
+        let a_data = data_a.clone();
+        let peer_list: Peers = Arc::new(vec![address_b.to_string()]);
+        let server_a = thread::spawn(move || {
+            let (stream, _) = listener_a.accept().unwrap();
+            handle(
+                stream,
+                a_chain,
+                peer_list,
+                Arc::new(Mutex::new(HashSet::new())),
+                a_pool,
+                a_data,
+                a_active,
+            );
+        });
+
+        let mut client = TcpStream::connect(address_a).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let request = Message {
+            kind: "transaction".into(),
+            transaction: Some(tx),
+            block: None,
+            blocks: None,
+            address: None,
+            balance: None,
+            nonce: None,
+            transaction_id: None,
+            transaction_state: None,
+            confirmed_height: None,
+            confirmations: None,
+            node_status: None,
+        };
+        let mut wire = authenticated_wire(&request).unwrap();
+        wire.push(b'\\n');
+        client.write_all(&wire).unwrap();
+        let mut ack_line = Vec::new();
+        BufReader::new(client).read_until(b'\\n', &mut ack_line).unwrap();
+        let ack: AuthenticatedMessage = serde_json::from_slice(&ack_line).unwrap();
+        assert_eq!(ack.message.transaction_state.as_deref(), Some("accepted"));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if pool_b.lock().unwrap().contains_key(&tx_id) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "node B did not receive the transaction");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        server_a.join().unwrap();
+        server_b.join().unwrap();
+        let _ = fs::remove_file(data_a);
+        let _ = fs::remove_file(data_b);
+        let _ = fs::remove_file(mempool_path(&std::env::temp_dir().join(format!("ana-two-node-a-{}.json", std::process::id()))));
+        let _ = fs::remove_file(mempool_path(&std::env::temp_dir().join(format!("ana-two-node-b-{}.json", std::process::id()))));
+    }
+
+    #[test]
     fn node_status_is_served_over_a_real_tcp_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

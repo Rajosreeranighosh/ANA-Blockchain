@@ -71,3 +71,10 @@ The implementation uses an implicit protocol-defined block subsidy rather than a
 ### Persistent mempool (experimental)
 
 Each node stores pending transactions in a sibling file named `<chain-data-file>.mempool.json`. The node writes snapshots through a temporary file and atomic rename, then restores the pool at startup. Restored entries must have a valid signature, matching transaction ID, and be executable against the currently validated ledger; stale, malformed, or unexecutable entries are discarded. Confirmed transactions are removed, and the pool is revalidated after chain updates and reorganizations. This is local node state, not consensus data, and peers may have different mempools.
+
+
+### Peer network safeguards (experimental)
+
+The node limits inbound work to 64 concurrent connections, caps each newline-delimited JSON message at 8 MiB, and applies 10-second socket read/write timeouts and outbound connect timeouts. Malformed, incomplete, oversized, and unauthenticated messages are rejected.
+
+For nodes communicating across machines, set the same high-entropy `ANA_PEER_TOKEN` environment variable on every node before starting it. The token is sent as a shared bearer secret over the existing TCP transport. **This transport is not encrypted**: use a trusted private network or VPN, and do not expose the peer port to the public internet without a TLS/VPN layer. If the token is unset, inbound connections are accepted only from loopback addresses, so remote peers cannot connect. These controls reduce basic resource abuse but do not replace TLS, rate limiting, authenticated key identities, or protocol-level sync pagination.

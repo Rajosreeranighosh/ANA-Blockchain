@@ -177,7 +177,7 @@ impl AnaWalletApp {
         if self.address.is_empty() || self.qr_texture.is_some() { return; }
         if let Ok(code) = qrcode::QrCode::new(self.address.as_bytes()) {
             let width = code.width();
-            let pixels = code.to_colors().iter().map(|color| match color {
+            let pixels: Vec<egui::Color32> = code.to_colors().iter().map(|color| match color {
                 qrcode::Color::Dark => egui::Color32::BLACK,
                 qrcode::Color::Light => egui::Color32::WHITE,
             }).collect();

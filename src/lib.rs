@@ -11,6 +11,10 @@ pub const MAX_SUPPLY: u64 = 21_000_000 * COIN;
 pub const BLOCK_REWARD: u64 = 50 * COIN;
 pub const NETWORK: &str = "ANA-TESTNET-1";
 pub const TESTNET_DIFFICULTY: u16 = 8;
+pub const DIFFICULTY_RETARGET_INTERVAL: u64 = 10;
+pub const TARGET_BLOCK_SECONDS: u64 = 30;
+pub const MIN_TESTNET_DIFFICULTY: u16 = 4;
+pub const MAX_TESTNET_DIFFICULTY: u16 = 24;
 pub const RANDOMX_SEED: &[u8] = b"ANA-TESTNET-RANDOMX-SEED-v1";
 
 /// Parse a human ANA amount without floating-point rounding.
@@ -267,6 +271,47 @@ impl Ledger {
 mod tests {
     use super::*;
 
+    fn retarget_history(elapsed: u64, tip_difficulty: u16) -> Vec<Block> {
+        let genesis = genesis_block();
+        let mut blocks = vec![genesis.clone()];
+        for height in 1..=DIFFICULTY_RETARGET_INTERVAL {
+            blocks.push(Block {
+                height,
+                previous: String::new(),
+                timestamp: genesis.timestamp + elapsed * height / DIFFICULTY_RETARGET_INTERVAL,
+                miner: genesis.miner.clone(),
+                transactions: Vec::new(),
+                nonce: 0,
+                difficulty: if height == DIFFICULTY_RETARGET_INTERVAL { tip_difficulty } else { TESTNET_DIFFICULTY },
+                hash: String::new(),
+            });
+        }
+        blocks
+    }
+
+    #[test]
+    fn difficulty_retargets_up_when_blocks_are_too_fast() {
+        let blocks = retarget_history(10, TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&blocks).unwrap(), TESTNET_DIFFICULTY + 1);
+    }
+
+    #[test]
+    fn difficulty_retargets_down_when_blocks_are_too_slow() {
+        let blocks = retarget_history(1_000, TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&blocks).unwrap(), TESTNET_DIFFICULTY - 1);
+    }
+
+    #[test]
+    fn difficulty_retarget_is_bounded_and_waits_for_full_window() {
+        let fast = retarget_history(1, MAX_TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&fast).unwrap(), MAX_TESTNET_DIFFICULTY);
+        let slow = retarget_history(1_000, MIN_TESTNET_DIFFICULTY);
+        assert_eq!(expected_next_difficulty(&slow).unwrap(), MIN_TESTNET_DIFFICULTY);
+        let mut partial = retarget_history(10, TESTNET_DIFFICULTY);
+        partial.pop();
+        assert_eq!(expected_next_difficulty(&partial).unwrap(), TESTNET_DIFFICULTY);
+    }
+
     #[test]
     fn signatures_detect_tampering() {
         let a = SigningKey::generate(&mut OsRng);
@@ -454,6 +499,33 @@ pub fn genesis_block() -> Block {
     }
 }
 
+/// Derive the next block difficulty using only the validated chain history.
+/// Retargets every 10 completed blocks, moving at most one bit per window.
+pub fn expected_next_difficulty(blocks: &[Block]) -> Result<u16> {
+    let tip = blocks.last().context("chain is empty")?;
+    let next_height = tip.height.checked_add(1).context("height overflow")?;
+    if next_height <= DIFFICULTY_RETARGET_INTERVAL
+        || (next_height - 1) % DIFFICULTY_RETARGET_INTERVAL != 0
+    {
+        return Ok(if tip.height == 0 { TESTNET_DIFFICULTY } else { tip.difficulty });
+    }
+
+    let ancestor_index = blocks.len().checked_sub(1 + DIFFICULTY_RETARGET_INTERVAL as usize)
+        .context("insufficient retarget history")?;
+    let ancestor = &blocks[ancestor_index];
+    let elapsed = tip.timestamp.saturating_sub(ancestor.timestamp);
+    let target = TARGET_BLOCK_SECONDS * DIFFICULTY_RETARGET_INTERVAL;
+    let current = if tip.height == 0 { TESTNET_DIFFICULTY } else { tip.difficulty };
+
+    if elapsed < target / 2 {
+        Ok(current.saturating_add(1).min(MAX_TESTNET_DIFFICULTY))
+    } else if elapsed > target.saturating_mul(2) {
+        Ok(current.saturating_sub(1).max(MIN_TESTNET_DIFFICULTY))
+    } else {
+        Ok(current.clamp(MIN_TESTNET_DIFFICULTY, MAX_TESTNET_DIFFICULTY))
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ChainState {
     pub blocks: Vec<Block>,
@@ -511,8 +583,9 @@ impl ChainState {
         if block.timestamp < previous.timestamp {
             bail!("block timestamp moved backwards");
         }
-        if block.difficulty != TESTNET_DIFFICULTY {
-            bail!("unexpected testnet difficulty");
+        let expected_difficulty = expected_next_difficulty(&self.blocks)?;
+        if block.difficulty != expected_difficulty {
+            bail!("unexpected block difficulty: expected {expected_difficulty}, got {}", block.difficulty);
         }
         validate_address(&block.miner)?;
         let actual = block_hash(&block)?;
@@ -558,7 +631,7 @@ impl ChainState {
             miner,
             transactions,
             nonce: 0,
-            difficulty: TESTNET_DIFFICULTY,
+            difficulty: expected_next_difficulty(&self.blocks)?,
             hash: String::new(),
         };
         let flags = RandomxFlags::default();

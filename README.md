@@ -4,7 +4,8 @@
 - Network: ANA-TESTNET-1
 - Proof of Work: RandomX (light mode)
 - Testnet RandomX key: ANA-TESTNET-RANDOMX-SEED-v1
-- Fixed testnet difficulty: 8 leading zero bits
+- Initial testnet difficulty: 8 leading zero bits
+- Dynamic difficulty: retarget every 10 completed blocks toward a 30-second block interval; adjust by at most 1 bit per window; clamp to 4–24 bits
 - Maximum supply target: 21,000,000 ANA
 - Block subsidy: up to 50 ANA per block, clamped to remaining supply at the 21,000,000 ANA cap
 - Genesis premine: none; the genesis ledger starts with zero minted ANA
@@ -41,7 +42,7 @@ The nodes request the peer chain at startup, validate received blocks, compare c
 ## Current testnet-alpha limitations
 - Nodes maintain an in-memory transaction mempool, validate sender signatures/nonces/balances, include eligible pending transactions in mined blocks, and update balances/nonces when blocks are accepted. Pending transactions are removed after confirmation. The mempool is not persisted across restarts.
 - Nodes validate full candidate chains from genesis and select by cumulative proof-of-work; equal-work ties use the smaller tip hash. Reorganizations replay blocks to rebuild balances/nonces. Displaced transactions are revalidated in the local mempool. This is a minimal testnet rule, not adversarially hardened consensus.
-- Difficulty is fixed at 8 bits and is only suitable for local experimentation.
+- Difficulty starts at 8 bits and retargets every 10 completed blocks using the elapsed time across that window. Each retarget changes difficulty by at most one bit, with experimental bounds of 4–24 bits and a 30-second target interval.
 - RandomX uses one fixed testnet seed; no epoch seed schedule exists.
 - The node protocol has no authentication, rate limits, peer discovery, message size limits, or DoS protection.
 - The JSON-based consensus header encoding is deterministic for this Rust struct today but is not yet a formally versioned canonical wire format.
@@ -52,7 +53,7 @@ The nodes request the peer chain at startup, validate received blocks, compare c
 ## Fork choice and reorganization (testnet alpha)
 Each non-genesis block contributes work equal to 2^difficulty. Nodes validate a candidate chain from the fixed genesis before replacing local state. Greater cumulative work wins; equal-work chains use the lexicographically smaller hexadecimal tip hash as a deterministic tie-break. Balances, nonces, and minted supply are rebuilt by replaying the selected chain. Transactions found only on a displaced branch are returned to the local mempool and revalidated.
 
-This is a minimal testnet rule. Fixed difficulty, unauthenticated peers, unbounded chain messages, and the absence of checkpoints/finality mean it is not safe for public adversarial deployment.
+This is a minimal testnet rule. The simple timestamp-based retarget rule, unauthenticated peers, unbounded chain messages, and the absence of checkpoints/finality mean it is not safe for public adversarial deployment.
 
 ## Block rewards and supply accounting
 

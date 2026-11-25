@@ -727,3 +727,87 @@ impl ChainState {
         Ok(rebuilt)
     }
 }
+
+
+// Encrypted wallet keystore v1. Uses Argon2id + XChaCha20-Poly1305.
+#[derive(Serialize, Deserialize)]
+struct EncryptedWalletFile {
+    version: u32,
+    network: String,
+    kdf: String,
+    salt: String,
+    nonce: String,
+    ciphertext: String,
+}
+
+fn wallet_kek(passphrase: &[u8], salt: &[u8; 16]) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let params = Params::new(19_456, 2, 1, Some(32)).context("invalid wallet KDF parameters")?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = zeroize::Zeroizing::new([0u8; 32]);
+    argon.hash_password_into(passphrase, salt, &mut *key)
+        .map_err(|e| anyhow::anyhow!("wallet key derivation failed: {e}"))?;
+    Ok(key)
+}
+
+/// Create an encrypted wallet. Existing files are never overwritten.
+pub fn create_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<String> {
+    use chacha20poly1305::{aead::{Aead, KeyInit}, XChaCha20Poly1305, XNonce};
+    use rand::RngCore;
+    use std::{fs::OpenOptions, io::Write};
+    if passphrase.len() < 12 {
+        bail!("wallet passphrase must be at least 12 bytes");
+    }
+    if path.exists() { bail!("refusing to overwrite wallet"); }
+    let signing = SigningKey::generate(&mut OsRng);
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let key = wallet_kek(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&*key).into());
+    let ciphertext = cipher.encrypt(XNonce::from_slice(&nonce), signing.to_bytes().as_ref())
+        .map_err(|_| anyhow::anyhow!("wallet encryption failed"))?;
+    let file = EncryptedWalletFile {
+        version: 1, network: NETWORK.into(), kdf: "argon2id-19m-2-1".into(),
+        salt: hex::encode(salt), nonce: hex::encode(nonce), ciphertext: hex::encode(ciphertext),
+    };
+    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    let temp = path.with_extension("wallet-tmp");
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut output = options.open(&temp).context("could not create temporary wallet file")?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
+    }
+    output.write_all(&serde_json::to_vec_pretty(&file)?)?;
+    output.sync_all()?;
+    fs::rename(&temp, path).context("could not atomically install wallet file")?;
+    Ok(address(&signing.verifying_key()))
+}
+
+/// Unlock a v1 encrypted wallet. Legacy plaintext wallets are intentionally not accepted here.
+pub fn open_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<SigningKey> {
+    use chacha20poly1305::{aead::{Aead, KeyInit}, XChaCha20Poly1305, XNonce};
+    let file: EncryptedWalletFile = serde_json::from_slice(&fs::read(path)?)
+        .context("invalid encrypted ANA wallet file")?;
+    if file.version != 1 || file.network != NETWORK || file.kdf != "argon2id-19m-2-1" {
+        bail!("unsupported wallet version, network, or KDF");
+    }
+    let salt: [u8; 16] = hex::decode(file.salt)?.try_into()
+        .map_err(|_| anyhow::anyhow!("invalid wallet salt"))?;
+    let nonce: [u8; 24] = hex::decode(file.nonce)?.try_into()
+        .map_err(|_| anyhow::anyhow!("invalid wallet nonce"))?;
+    let ciphertext = hex::decode(file.ciphertext)?;
+    let key = wallet_kek(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new((&*key).into());
+    let mut plaintext = zeroize::Zeroizing::new(
+        cipher.decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
+            .map_err(|_| anyhow::anyhow!("wrong passphrase or damaged wallet"))?
+    );
+    let secret: [u8; 32] = plaintext.as_slice().try_into()
+        .map_err(|_| anyhow::anyhow!("invalid decrypted private key"))?;
+    plaintext.zeroize();
+    Ok(SigningKey::from_bytes(&secret))
+}

@@ -109,8 +109,14 @@ fn main() -> Result<()> {
     println!("ANA RandomX development mining prototype");
     println!("WARNING: experimental dev seed and incomplete chain rules; NOT mainnet-ready.");
     println!("{}", serde_json::to_string_pretty(&block)?);
-    println!("Reward proposal: {} ANA", block.header.reward as f64 / COIN as f64);
-    println!("Supply cap target: {} ANA (not yet enforced by ledger state)", MAX_SUPPLY / COIN);
+    println!(
+        "Reward proposal: {} ANA",
+        block.header.reward as f64 / COIN as f64
+    );
+    println!(
+        "Supply cap target: {} ANA (not yet enforced by ledger state)",
+        MAX_SUPPLY / COIN
+    );
     Ok(())
 }
 

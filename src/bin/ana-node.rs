@@ -795,10 +795,11 @@ mod tests {
         let tx = sign(&sender, receiver_address.clone(), COIN, 7, 0).unwrap();
         let mut genesis = ChainState::new().blocks[0].clone();
         genesis.height = 0;
+        let tx2 = sign(&sender, receiver_address.clone(), COIN / 2, 3, 1).unwrap();
         let mut block = genesis.clone();
         block.height = 1;
         block.timestamp = genesis.timestamp + 30;
-        block.transactions.push(tx.clone());
+        block.transactions.extend([tx.clone(), tx2.clone()]);
         let blocks = vec![genesis, block];
 
         let page = build_history_page(&blocks, &receiver_address, 0, 0, 1).unwrap();
@@ -808,7 +809,11 @@ mod tests {
         assert_eq!(page.entries[0].amount, COIN);
         assert_eq!(page.entries[0].fee, 7);
         assert_eq!(page.entries[0].confirmations, 1);
-        assert!(!page.has_more);
+        assert!(page.has_more);
+        let page2 = build_history_page(&blocks, &receiver_address, page.next_height, page.next_transaction_index, 1).unwrap();
+        assert_eq!(page2.entries.len(), 1);
+        assert_eq!(page2.entries[0].transaction_id, tx2.id().unwrap());
+        assert!(!page2.has_more);
 
         let empty = build_history_page(&blocks, &unrelated_address, 0, 0, 1).unwrap();
         assert!(empty.entries.is_empty());

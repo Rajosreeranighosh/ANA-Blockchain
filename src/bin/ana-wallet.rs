@@ -1,6 +1,6 @@
 use ana_blockchain::{address, encrypt_wallet_key, open_encrypted_wallet, open_wallet, parse_amount, sign, rpc::NodeClient};
 use anyhow::{bail, Context, Result};
-use std::{env, fs, io::Write, path::Path};
+use std::{env, fs, io::Write, path::Path, thread, time::{Duration, Instant}};
 
 fn unlock(path: &str) -> Result<ed25519_dalek::SigningKey> {
     let passphrase = rpassword::prompt_password("Wallet passphrase: ")?;
@@ -96,7 +96,30 @@ fn main() -> Result<()> {
                 println!("Confirmations: 0 (still pending in this node mempool)");
             }
         }
-        _ => println!("ANA wallet: new [file] | migrate <legacy-file> <encrypted-file> | backup <wallet-file> <backup-file> | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node> | status <node> | tx-status <transaction-id> <node>"),
+        Some("wait-confirmations") => {
+            if args.len() != 6 {
+                bail!("Usage: ana-wallet wait-confirmations <transaction-id> <node-ip:port> <target-confirmations> <timeout-seconds>");
+            }
+            let target: u64 = args[4].parse().context("target confirmations must be a positive integer")?;
+            let timeout: u64 = args[5].parse().context("timeout must be an integer number of seconds")?;
+            if target == 0 || timeout == 0 { bail!("target confirmations and timeout must both be greater than zero"); }
+            let client = NodeClient::new(&args[3]);
+            let deadline = Instant::now() + Duration::from_secs(timeout);
+            loop {
+                let status = client.transaction_status(&args[2])?;
+                println!("Status: {} | confirmations: {}", status.state, status.confirmations);
+                if status.state == "confirmed" && status.confirmations >= target {
+                    println!("Target reached: {} confirmations.", status.confirmations);
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    bail!("timed out before reaching {target} confirmations; transaction may still confirm later");
+                }
+                thread::sleep(Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())));
+            }
+            println!("Warning: confirmations are not finality; a later reorganization can reduce the count.");
+        }
+        _ => println!("ANA wallet: new [file] | migrate <legacy-file> <encrypted-file> | backup <wallet-file> <backup-file> | address [file] | balance <address> <node> | send <file> <recipient> <amount> <fee> <node> | status <node> | tx-status <transaction-id> <node> | wait-confirmations <transaction-id> <node> <target> <timeout-seconds>"),
     }
     Ok(())
 }

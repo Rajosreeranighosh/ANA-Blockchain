@@ -8,3 +8,4 @@ node-a.json
 node-b.json
 *.wallet-tmp
 *.mempool.json
+ana-address-book.json

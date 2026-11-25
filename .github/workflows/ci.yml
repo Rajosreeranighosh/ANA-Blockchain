@@ -43,6 +43,10 @@ jobs:
           CMAKE_POLICY_VERSION_MINIMUM: '3.5'
           LIBRARY_PATH: /usr/local/lib
         run: cargo test --all-targets
+      - name: Patch RandomX MSVC assembly generation (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/patch-randomx-windows.ps1
       - name: Compile and test all targets (Windows)
         if: runner.os == 'Windows'
         env:

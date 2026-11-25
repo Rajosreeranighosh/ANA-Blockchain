@@ -21,6 +21,11 @@ cargo test --all-targets
 cargo build --release
 ```
 
+The test suite includes a TCP-level node protocol smoke test that starts a local listener and verifies a real `get_status` request/response using the configured peer-authentication envelope.
+
+```
+```
+
 ## Create an encrypted miner wallet
 ```sh
 cargo run --release --bin ana-wallet -- new miner.json

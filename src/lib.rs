@@ -507,7 +507,7 @@ pub fn expected_next_difficulty(blocks: &[Block]) -> Result<u16> {
     if next_height <= DIFFICULTY_RETARGET_INTERVAL
         || (next_height - 1) % DIFFICULTY_RETARGET_INTERVAL != 0
     {
-        return Ok(tip.difficulty.max(TESTNET_DIFFICULTY));
+        return Ok(if tip.height == 0 { TESTNET_DIFFICULTY } else { tip.difficulty });
     }
 
     let ancestor_index = blocks.len().checked_sub(1 + DIFFICULTY_RETARGET_INTERVAL as usize)
@@ -515,7 +515,7 @@ pub fn expected_next_difficulty(blocks: &[Block]) -> Result<u16> {
     let ancestor = &blocks[ancestor_index];
     let elapsed = tip.timestamp.saturating_sub(ancestor.timestamp);
     let target = TARGET_BLOCK_SECONDS * DIFFICULTY_RETARGET_INTERVAL;
-    let current = tip.difficulty.max(TESTNET_DIFFICULTY);
+    let current = if tip.height == 0 { TESTNET_DIFFICULTY } else { tip.difficulty };
 
     if elapsed < target / 2 {
         Ok(current.saturating_add(1).min(MAX_TESTNET_DIFFICULTY))

@@ -27,11 +27,13 @@ The same Cargo commands work in Windows PowerShell after installing Rust MSVC, V
 - Receive: address and QR code.
 - Transactions: bounded, paginated confirmed-chain history for the wallet address, plus transaction-ID status lookup.
 - Address book: validated local contacts that can populate the Send recipient field.
+- Security: automatic wallet lock after 15 minutes without input; manual close-wallet control remains available.
 - Settings: node endpoint and close-wallet control.
 
 ## Current limitations and security notes
 
 - The local address book is a separate, unencrypted JSON file containing labels and public addresses only; it is ignored by Git and should still be treated as private user data.
+- The GUI reuses the existing encrypted wallet keystore. For an encrypted backup, use `cargo run --release --bin ana-wallet -- backup wallet.encrypted.json wallet-backup.encrypted.json`; the command verifies the copy. Restoring requires copying the encrypted backup back to a wallet file and unlocking it with the original passphrase.
 - This first GUI version uses the existing encrypted ANA keystore (Argon2id + XChaCha20-Poly1305). It does not implement a mnemonic seed, hardware wallet support, subaddresses, multisig, or wallet restore from a seed phrase.
 - Wallet history currently scans confirmed transparent transactions from the node's canonical chain. Pages are bounded to at most 1,000 records and pinned to a tip hash; if the tip changes during pagination, restart the scan. Pending transactions are not yet included in the history list.
 - History is transparent-account history, not private-output scanning. A future stealth wallet scanner requires key-image/output-index integration and cannot be inferred from this API.

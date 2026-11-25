@@ -23,16 +23,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config libgl1-mesa-dev libx11-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev
-      - name: Add compatibility name for RandomX C++ runtime (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          # randomx-bindings-sys 0.1.5 hardcodes "libc++" as its link name.
-          # Its RandomX static library is built with the runner's GNU toolchain,
-          # so provide that runtime under the hardcoded name.
-          GNU_CXX_RUNTIME="$(g++ -print-file-name=libstdc++.so)"
-          test -f "$GNU_CXX_RUNTIME"
-          sudo mkdir -p /usr/local/lib
-          sudo ln -sf "$GNU_CXX_RUNTIME" /usr/local/lib/liblibc++.so
+      - name: Configure MSVC developer environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Format Rust sources
         run: cargo fmt --all
       - name: Verify Rust formatting
@@ -41,7 +34,6 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CMAKE_POLICY_VERSION_MINIMUM: '3.5'
-          LIBRARY_PATH: /usr/local/lib
         run: cargo test --all-targets
       - name: Compile and test all targets (Windows)
         if: runner.os == 'Windows'

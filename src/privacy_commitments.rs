@@ -96,4 +96,32 @@ mod tests {
         assert!(verify_opening(&[0xff; 32], 1, Scalar::ZERO).is_err());
         assert!(add_commitments(&[0xff; 32], &[0u8; 32]).is_err());
     }
+
+    #[test]
+    fn blinding_generator_is_non_identity_and_distinct_from_value_generator() {
+        let h = blinding_generator();
+        assert_ne!(h, RistrettoPoint::default());
+        assert_ne!(h, RISTRETTO_BASEPOINT_POINT);
+    }
+
+    #[test]
+    fn addition_rejects_malformed_encoding_in_either_operand() {
+        let valid = commit_amount(1, Scalar::from(9u64));
+        assert!(add_commitments(&[0xff; 32], &valid).is_err());
+        assert!(add_commitments(&valid, &[0xff; 32]).is_err());
+    }
+
+    #[test]
+    fn homomorphic_addition_returns_a_canonical_ristretto_encoding() {
+        let a = commit_amount(5, Scalar::from(13u64));
+        let b = commit_amount(8, Scalar::from(21u64));
+        let sum = add_commitments(&a, &b).unwrap();
+        let point = CompressedRistretto(sum).decompress().unwrap();
+        assert_eq!(point.compress().to_bytes(), sum);
+        assert!(verify_opening(
+            &sum,
+            13,
+            Scalar::from(34u64)
+        ).is_ok());
+    }
 }

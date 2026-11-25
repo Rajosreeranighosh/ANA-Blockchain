@@ -765,7 +765,7 @@ pub fn create_encrypted_wallet(path: &Path, passphrase: &[u8]) -> Result<String>
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut nonce);
     let key = wallet_kek(passphrase, &salt)?;
-    let cipher = XChaCha20Poly1305::new((&*key).into());
+    let cipher = XChaCha20Poly1305::new_from_slice(&*key).map_err(|_| anyhow::anyhow!("invalid wallet encryption key"))?;
     let ciphertext = cipher.encrypt(XNonce::from_slice(&nonce), signing.to_bytes().as_ref())
         .map_err(|_| anyhow::anyhow!("wallet encryption failed"))?;
     let file = EncryptedWalletFile {

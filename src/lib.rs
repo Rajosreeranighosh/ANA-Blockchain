@@ -429,6 +429,19 @@ mod tests {
     }
 
     #[test]
+    fn ledger_rejects_preexisting_supply_above_cap_atomically() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut ledger = Ledger::default();
+        ledger.minted = MAX_SUPPLY + 1;
+        let before = ledger.clone();
+
+        assert!(ledger.apply_block(&empty_block(&miner, 1)).is_err());
+        assert_eq!(ledger.minted, before.minted);
+        assert_eq!(ledger.balances, before.balances);
+        assert_eq!(ledger.nonces, before.nonces);
+    }
+
+    #[test]
     fn failed_block_does_not_partially_change_ledger() {
         let sender = SigningKey::generate(&mut OsRng);
         let receiver = SigningKey::generate(&mut OsRng);

@@ -218,7 +218,7 @@ impl Ledger {
     /// activation rules are separately specified and reviewed.
     pub fn shadow_state_root(&self) -> Result<String> {
         let mut hasher = Sha256::new();
-        hasher.update(b"ANA-TRANSPARENT-STATE-SHADOW-v1\\0");
+        hasher.update(b"ANA-TRANSPARENT-STATE-SHADOW-v1");
         hasher.update((NETWORK.len() as u64).to_le_bytes());
         hasher.update(NETWORK.as_bytes());
         hasher.update(self.minted.to_le_bytes());

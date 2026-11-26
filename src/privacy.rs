@@ -5,7 +5,13 @@
 //! cryptographic verification. Do not accept these transactions in consensus.
 
 use anyhow::{bail, Result};
-use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, edwards::{CompressedEdwardsY, EdwardsPoint}, scalar::Scalar, traits::IsIdentity};
+use curve25519_dalek::{
+    constants::{ED25519_BASEPOINT_POINT, RISTRETTO_BASEPOINT_POINT},
+    edwards::{CompressedEdwardsY, EdwardsPoint},
+    ristretto::{CompressedRistretto, RistrettoPoint},
+    scalar::Scalar,
+    traits::IsIdentity,
+};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
@@ -91,7 +97,7 @@ impl PrivacyTransactionV1 {
             if !key_images.insert(input.key_image) {
                 bail!("privacy input has a duplicate key image");
             }
-            validate_compressed_point(
+            validate_compressed_ristretto(
                 &input.pseudo_output_commitment,
                 "pseudo-output commitment",
             )?;
@@ -112,7 +118,7 @@ impl PrivacyTransactionV1 {
         for output in &self.outputs {
             validate_compressed_point(&output.stealth.one_time_key, "one-time output key")?;
             validate_compressed_point(&output.stealth.tx_public_key, "transaction public key")?;
-            validate_compressed_point(&output.commitment, "output commitment")?;
+            validate_compressed_ristretto(&output.commitment, "output commitment")?;
         }
         Ok(())
     }
@@ -270,6 +276,22 @@ fn decompress_point(encoded: &[u8; 32]) -> Result<EdwardsPoint> {
     validate_compressed_point(encoded, "wallet public point")
 }
 
+/// Decode a canonical, non-identity Ristretto point used for Pedersen commitments.
+/// Ristretto encodings are not interchangeable with Edwards compressed points.
+fn validate_compressed_ristretto(encoded: &[u8; 32], field: &str) -> Result<RistrettoPoint> {
+    let compressed = CompressedRistretto(*encoded);
+    let point = compressed
+        .decompress()
+        .ok_or_else(|| anyhow::anyhow!("invalid Ristretto point encoding for {field}"))?;
+    if point.compress().to_bytes() != *encoded {
+        bail!("non-canonical Ristretto point encoding for {field}");
+    }
+    if point.is_identity() {
+        bail!("identity Ristretto point for {field}");
+    }
+    Ok(point)
+}
+
 fn output_derivation(shared: &EdwardsPoint, output_index: u64) -> Scalar {
     let mut hasher = Sha512::new();
     hasher.update(b"ANA-PRIVACY-OUTPUT-DERIVATION-v1");
@@ -324,6 +346,7 @@ mod tests {
 
     fn structurally_valid_transaction() -> PrivacyTransactionV1 {
         let valid_point = ED25519_BASEPOINT_POINT.compress().to_bytes();
+        let valid_commitment = RISTRETTO_BASEPOINT_POINT.compress().to_bytes();
         PrivacyTransactionV1 {
             version: PRIVACY_TX_VERSION,
             network: "ANA-TESTNET-1".into(),
@@ -332,12 +355,12 @@ mod tests {
                     .map(|global_index| OutputReference { global_index })
                     .collect(),
                 key_image: valid_point,
-                pseudo_output_commitment: valid_point,
+                pseudo_output_commitment: valid_commitment,
                 clsag_signature: vec![3; 64],
             }],
             outputs: vec![PrivacyOutputV1 {
                 stealth: StealthOutputV1 { one_time_key: valid_point, tx_public_key: valid_point, view_tag: 7 },
-                commitment: valid_point,
+                commitment: valid_commitment,
                 encrypted_amount: [6; 24],
             }],
             fee: 100,
@@ -388,6 +411,34 @@ mod tests {
         assert!(validate_compressed_point(&[0xff; 32], "test").is_err());
         let basepoint = ED25519_BASEPOINT_POINT.compress().to_bytes();
         assert!(validate_compressed_point(&basepoint, "test").is_ok());
+    }
+
+    #[test]
+    fn privacy_v1_uses_ristretto_for_pedersen_commitments() {
+        let mut tx = structurally_valid_transaction();
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_ok());
+
+        // Edwards encodings must not be accepted in Ristretto commitment fields.
+        let edwards = ED25519_BASEPOINT_POINT.compress().to_bytes();
+        tx.inputs[0].pseudo_output_commitment = edwards;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].commitment = edwards;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn privacy_v1_rejects_identity_ristretto_commitments() {
+        let identity = RistrettoPoint::default().compress().to_bytes();
+
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].pseudo_output_commitment = identity;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].commitment = identity;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
     }
 
     #[test]

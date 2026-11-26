@@ -83,7 +83,7 @@ pub fn verify_peer_identity(
     let (network, node) = value
         .split_once('/')
         .context("peer certificate URI SAN must contain network and node IDs")?;
-    if node.contains('/') || node.contains(['?', '#', '%', ':']) {
+    if node.contains('/') || node.chars().any(|ch| matches!(ch, '?' | '#' | '%' | ':')) {
         bail!("peer certificate URI SAN contains forbidden URI components");
     }
     if !is_lower_hex_64(network) || !is_lower_hex_64(node) {

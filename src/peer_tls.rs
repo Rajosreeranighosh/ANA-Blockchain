@@ -13,13 +13,13 @@ use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
 };
 use sha2::{Digest, Sha256};
-use x509_parser::prelude::{parse_x509_certificate, GeneralName};
 use std::{
     fs::File,
     io::BufReader,
     path::Path,
     sync::Arc,
 };
+use x509_parser::prelude::{parse_x509_certificate, GeneralName};
 
 const ALPN_PROTOCOL: &[u8] = b"ana-peer/1";
 
@@ -220,15 +220,24 @@ pub fn load_client_config(
 mod tests {
     use super::*;
 
-
     fn fixture_certificate(name: &str) -> Vec<u8> {
         let pem = match name {
             "valid" => include_bytes!("../tests/fixtures/peer-valid.pem").as_slice(),
-            "wrong-network" => include_bytes!("../tests/fixtures/peer-wrong-network.pem").as_slice(),
-            "wrong-node" => include_bytes!("../tests/fixtures/peer-wrong-node.pem").as_slice(),
-            "malformed" => include_bytes!("../tests/fixtures/peer-malformed-uri.pem").as_slice(),
-            "missing-san" => include_bytes!("../tests/fixtures/peer-missing-san.pem").as_slice(),
-            "duplicate-san" => include_bytes!("../tests/fixtures/peer-duplicate-san.pem").as_slice(),
+            "wrong-network" => {
+                include_bytes!("../tests/fixtures/peer-wrong-network.pem").as_slice()
+            },
+            "wrong-node" => {
+                include_bytes!("../tests/fixtures/peer-wrong-node.pem").as_slice()
+            },
+            "malformed" => {
+                include_bytes!("../tests/fixtures/peer-malformed-uri.pem").as_slice()
+            },
+            "missing-san" => {
+                include_bytes!("../tests/fixtures/peer-missing-san.pem").as_slice()
+            },
+            "duplicate-san" => {
+                include_bytes!("../tests/fixtures/peer-duplicate-san.pem").as_slice()
+            },
             _ => panic!("unknown certificate fixture"),
         };
         rustls_pemfile::certs(&mut BufReader::new(pem))
@@ -255,7 +264,12 @@ mod tests {
 
     #[test]
     fn wrong_network_is_rejected() {
-        assert!(verify_peer_identity(&fixture_certificate("wrong-network"), "testnet", None).is_err());
+        assert!(verify_peer_identity(
+            &fixture_certificate("wrong-network"),
+            "testnet",
+            None
+        )
+        .is_err());
         assert!(verify_peer_identity(&fixture_certificate("valid"), "mainnet", None).is_err());
     }
 

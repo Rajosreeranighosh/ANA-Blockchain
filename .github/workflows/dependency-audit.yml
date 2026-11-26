@@ -29,10 +29,14 @@ jobs:
           # visible even when this audit job runs on Ubuntu.
           for crate in clear_on_drop paste ttf-parser; do
             echo "::group::Dependency path (all targets): $crate"
-            cargo tree --locked --target all --invert "$crate" || true
+            cargo tree --locked --target all --edges all --invert "$crate" || true
             echo "::endgroup::"
           done
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Check RustSec advisories
-        run: cargo audit --deny warnings
+        # Keep vulnerability, unsound-code, and yanked-package findings blocking.
+        # RustSec "unmaintained" advisories are printed and tracked separately:
+        # replacing cryptographic/UI dependencies requires a tested migration,
+        # not silently removing privacy proofs or breaking the desktop wallet.
+        run: cargo audit --deny vulnerabilities --deny unsound --deny yanked

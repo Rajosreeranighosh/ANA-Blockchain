@@ -142,6 +142,21 @@ fn validate_bind_security(bind: &str) -> Result<()> {
     bail!("refusing non-loopback bind: peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
 }
 
+/// Outbound peers must obey the same loopback-only safety boundary as listeners.
+/// Otherwise this node could leak transactions or peer metadata over plaintext TCP.
+fn validate_peer_security(peer: &str) -> Result<()> {
+    let addresses: Vec<_> = peer.to_socket_addrs()
+        .with_context(|| format!("could not resolve configured peer {peer}"))?
+        .collect();
+    if addresses.is_empty() {
+        bail!("configured peer {peer} resolved to no socket addresses");
+    }
+    if addresses.iter().all(|address| address.ip().is_loopback()) {
+        return Ok(());
+    }
+    bail!("refusing non-loopback peer {peer}: outbound peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
+}
+
 #[derive(Serialize, Deserialize)]
 struct AuthenticatedMessage {
     #[serde(flatten)]
@@ -610,8 +625,12 @@ fn main() -> Result<()> {
         validate_address(&args[3])?;
         Some(args[3].clone())
     };
-    let peers: Peers = Arc::new(args.iter().skip(4).cloned().collect());
+    let configured_peers: Vec<String> = args.iter().skip(4).cloned().collect();
     validate_bind_security(bind)?;
+    for peer in &configured_peers {
+        validate_peer_security(peer)?;
+    }
+    let peers: Peers = Arc::new(configured_peers);
     let chain = Arc::new(Mutex::new(ChainState::load(&data_file)?));
     let mempool_file = mempool_path(&data_file);
     let restored = {
@@ -756,6 +775,15 @@ mod tests {
         let cache = seen.lock().unwrap();
         assert!(!cache.ids.contains("oldest"));
         assert!(cache.ids.contains(&format!("new-{}", MAX_SEEN_IDS - 1)));
+    }
+
+    #[test]
+    fn outbound_peer_transport_allows_loopback_only() {
+        assert!(validate_peer_security("127.0.0.1:18080").is_ok());
+        assert!(validate_peer_security("[::1]:18080").is_ok());
+        assert!(validate_peer_security("0.0.0.0:18080").is_err());
+        assert!(validate_peer_security("[::]:18080").is_err());
+        assert!(validate_peer_security("192.0.2.1:18080").is_err());
     }
 
     #[test]

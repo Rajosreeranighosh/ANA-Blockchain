@@ -137,11 +137,11 @@ Commit generated test-only CA, valid node certificates, and CRLs under a test-fi
 
 
 
-## 8. Pinned rustls 0.23 implementation notes
+## 8. Pinned rustls 0.23.46 implementation notes
 
-The initial dependency pins are recorded in `Cargo.toml`:
+The current dependency pins are recorded in `Cargo.toml` and `Cargo.lock`:
 
-- `rustls = 0.23.44`, with the `ring` and `std` features and default features disabled.
+- `rustls = 0.23.46`, with the `ring` and `std` features and default features disabled.
 - `rustls-pemfile = 2.2.0` for PEM decoding only.
 - `x509-parser = 0.17.0` for parsing and enforcing the ANA URI subject-alternative-name identity after normal certificate-chain validation.
 

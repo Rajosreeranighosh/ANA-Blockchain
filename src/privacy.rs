@@ -15,7 +15,16 @@ use curve25519_dalek::{
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
+
+pub const MAX_PRIVACY_KEY_IMAGES: usize = 500_000;
+const PRIVACY_KEY_IMAGE_STORE_VERSION: u8 = 1;
+const MAX_PRIVACY_KEY_IMAGE_STORE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub const PRIVACY_TX_VERSION: u8 = 1;
 /// Initial ring size chosen for the experimental v1 wire format.
@@ -138,6 +147,13 @@ fn valid_network_id(network: &str) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+#[derive(Serialize, Deserialize)]
+struct PrivacyKeyImageStoreV1 {
+    version: u8,
+    network: String,
+    key_images: Vec<[u8; 32]>,
+}
+
 /// In-memory experimental key-image registry for private-transaction testing.
 ///
 /// This registry is NOT consensus state and is NOT persistent. Call
@@ -176,8 +192,72 @@ impl PrivacyKeyImageRegistryV1 {
         expected_network: &str,
     ) -> Result<()> {
         self.check_unspent(tx, expected_network)?;
+        if self.spent.len().saturating_add(tx.inputs.len()) > MAX_PRIVACY_KEY_IMAGES {
+            bail!("privacy key-image registry capacity exceeded");
+        }
         self.spent.extend(tx.inputs.iter().map(|input| input.key_image));
         Ok(())
+    }
+
+    /// Persist a network-scoped snapshot using an atomic temporary-file rename.
+    /// This is experimental local storage, not consensus-grade database state:
+    /// callers must serialize writers and protect the containing directory.
+    pub fn save(&self, path: &Path, network: &str) -> Result<()> {
+        if !valid_network_id(network) {
+            bail!("invalid privacy key-image store network");
+        }
+        if self.spent.len() > MAX_PRIVACY_KEY_IMAGES {
+            bail!("privacy key-image registry capacity exceeded");
+        }
+        let mut key_images: Vec<[u8; 32]> = self.spent.iter().copied().collect();
+        key_images.sort_unstable();
+        let snapshot = PrivacyKeyImageStoreV1 {
+            version: PRIVACY_KEY_IMAGE_STORE_VERSION,
+            network: network.to_owned(),
+            key_images,
+        };
+        let bytes = serde_json::to_vec(&snapshot)?;
+        if bytes.len() as u64 > MAX_PRIVACY_KEY_IMAGE_STORE_BYTES {
+            bail!("privacy key-image store exceeds the size limit");
+        }
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    }
+
+    /// Load and strictly validate a network-scoped key-image snapshot.
+    pub fn load(path: &Path, expected_network: &str) -> Result<Self> {
+        if !valid_network_id(expected_network) {
+            bail!("invalid expected privacy key-image store network");
+        }
+        let file = fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_PRIVACY_KEY_IMAGE_STORE_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_PRIVACY_KEY_IMAGE_STORE_BYTES {
+            bail!("privacy key-image store exceeds the size limit");
+        }
+        let snapshot: PrivacyKeyImageStoreV1 = serde_json::from_slice(&bytes)?;
+        if snapshot.version != PRIVACY_KEY_IMAGE_STORE_VERSION
+            || snapshot.network != expected_network
+            || snapshot.key_images.len() > MAX_PRIVACY_KEY_IMAGES
+        {
+            bail!("unsupported, wrong-network, or oversized privacy key-image store");
+        }
+        let mut spent = HashSet::with_capacity(snapshot.key_images.len());
+        let mut previous: Option<[u8; 32]> = None;
+        for key_image in snapshot.key_images {
+            validate_compressed_point(&key_image, "persisted key image")?;
+            if previous.is_some_and(|value| key_image <= value) {
+                bail!("privacy key-image store is not strictly sorted or has duplicates");
+            }
+            previous = Some(key_image);
+            spent.insert(key_image);
+        }
+        Ok(Self { spent })
     }
 
     pub fn contains(&self, key_image: &[u8; 32]) -> bool {
@@ -491,6 +571,38 @@ mod tests {
         let mut tx = structurally_valid_transaction();
         tx.inputs[0].ring[1].global_index = tx.inputs[0].ring[0].global_index;
         assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_persists_and_is_network_scoped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("privacy-key-images.json");
+        let tx = structurally_valid_transaction();
+        let key_image = tx.inputs[0].key_image;
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        registry.record_after_verification(&tx, "ANA-TESTNET-1").unwrap();
+        registry.save(&path, "ANA-TESTNET-1").unwrap();
+
+        let loaded = PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").unwrap();
+        assert!(loaded.contains(&key_image));
+        assert_eq!(loaded.len(), 1);
+        assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-MAINNET").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_rejects_noncanonical_persisted_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bad-store.json");
+        let snapshot = PrivacyKeyImageStoreV1 {
+            version: PRIVACY_KEY_IMAGE_STORE_VERSION,
+            network: "ANA-TESTNET-1".into(),
+            key_images: vec![
+                ED25519_BASEPOINT_POINT.compress().to_bytes(),
+                ED25519_BASEPOINT_POINT.compress().to_bytes(),
+            ],
+        };
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").is_err());
     }
 
     #[test]

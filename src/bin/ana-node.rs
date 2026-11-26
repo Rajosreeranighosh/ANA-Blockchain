@@ -762,6 +762,18 @@ mod tests {
     }
 
     #[test]
+    fn mempool_persistence_replaces_existing_snapshot() {
+        let path = temp_file("mempool-replace");
+        fs::write(&path, b"stale snapshot").unwrap();
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        persist_mempool(&pool, &path).unwrap();
+        let restored: BTreeMap<String, Transaction> =
+            serde_json::from_slice(&read_bounded_file(&path, MAX_MEMPOOL_FILE_BYTES).unwrap()).unwrap();
+        assert!(restored.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn mempool_persistence_uses_unique_temp_files_and_leaves_no_temp_file() {
         let path = temp_file("mempool-atomic");
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));

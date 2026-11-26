@@ -547,6 +547,57 @@ mod tests {
     }
 
     #[test]
+    fn block_replay_accepts_sequential_nonces_and_accounts_for_fees_once() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let miner = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let receiver_address = address(&receiver.verifying_key());
+        let miner_address = address(&miner.verifying_key());
+        let mut ledger = Ledger::default();
+        ledger.balances.insert(sender_address.clone(), 10 * COIN);
+
+        let first = sign(&sender, receiver_address.clone(), COIN, COIN / 100, 0).unwrap();
+        let second = sign(&sender, receiver_address.clone(), 2 * COIN, COIN / 50, 1).unwrap();
+        let mut block = empty_block(&miner, 1);
+        block.transactions = vec![first, second];
+
+        ledger.apply_block(&block).unwrap();
+
+        assert_eq!(ledger.nonce(&sender_address), 2);
+        assert_eq!(ledger.balance(&sender_address), 7 * COIN - 3 * COIN / 100);
+        assert_eq!(ledger.balance(&receiver_address), 3 * COIN);
+        assert_eq!(ledger.balance(&miner_address), BLOCK_REWARD + 3 * COIN / 100);
+        assert_eq!(ledger.minted, BLOCK_REWARD);
+    }
+
+    #[test]
+    fn block_replay_rejects_duplicate_transaction_nonce_atomically() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let miner = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let mut ledger = Ledger::default();
+        ledger.balances.insert(sender_address.clone(), 5 * COIN);
+        let transaction = sign(
+            &sender,
+            address(&receiver.verifying_key()),
+            COIN,
+            COIN / 100,
+            0,
+        )
+        .unwrap();
+        let mut block = empty_block(&miner, 1);
+        block.transactions = vec![transaction.clone(), transaction];
+
+        let before = ledger.clone();
+        assert!(ledger.apply_block(&block).is_err());
+        assert_eq!(ledger.balances, before.balances);
+        assert_eq!(ledger.nonces, before.nonces);
+        assert_eq!(ledger.minted, before.minted);
+    }
+
+    #[test]
     fn first_block_mints_exactly_50_ana_to_miner() {
         let miner = SigningKey::generate(&mut OsRng);
         let miner_address = address(&miner.verifying_key());

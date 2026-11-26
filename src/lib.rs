@@ -211,6 +211,35 @@ impl Ledger {
         *self.nonces.get(a).unwrap_or(&0)
     }
 
+    /// Experimental deterministic commitment to transparent ledger state.
+    ///
+    /// This is shadow-only: it is not included in block headers and MUST NOT
+    /// be treated as a consensus commitment until canonical encoding and
+    /// activation rules are separately specified and reviewed.
+    pub fn shadow_state_root(&self) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ANA-TRANSPARENT-STATE-SHADOW-v1\\0");
+        hasher.update((NETWORK.len() as u64).to_le_bytes());
+        hasher.update(NETWORK.as_bytes());
+        hasher.update(self.minted.to_le_bytes());
+
+        hasher.update((self.balances.len() as u64).to_le_bytes());
+        for (address, balance) in &self.balances {
+            hasher.update((address.len() as u64).to_le_bytes());
+            hasher.update(address.as_bytes());
+            hasher.update(balance.to_le_bytes());
+        }
+
+        hasher.update((self.nonces.len() as u64).to_le_bytes());
+        for (address, nonce) in &self.nonces {
+            hasher.update((address.len() as u64).to_le_bytes());
+            hasher.update(address.as_bytes());
+            hasher.update(nonce.to_le_bytes());
+        }
+
+        Ok(hex::encode(hasher.finalize()))
+    }
+
     fn credit(&mut self, a: &str, n: u64) -> Result<()> {
         let v = self.balance(a).checked_add(n).context("balance overflow")?;
         self.balances.insert(a.into(), v);
@@ -271,6 +300,46 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadow_state_root_is_deterministic_and_domain_separated() {
+        let ledger = Ledger::default();
+        assert_eq!(ledger.shadow_state_root().unwrap(), ledger.shadow_state_root().unwrap());
+        assert_eq!(ledger.shadow_state_root().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn shadow_state_root_changes_for_balance_nonce_and_supply_mutations() {
+        let baseline = Ledger::default().shadow_state_root().unwrap();
+        let mut changed_balance = Ledger::default();
+        changed_balance.balances.insert("ana1example".into(), 1);
+        assert_ne!(baseline, changed_balance.shadow_state_root().unwrap());
+
+        let mut changed_nonce = Ledger::default();
+        changed_nonce.nonces.insert("ana1example".into(), 1);
+        assert_ne!(baseline, changed_nonce.shadow_state_root().unwrap());
+
+        let mut changed_supply = Ledger::default();
+        changed_supply.minted = 1;
+        assert_ne!(baseline, changed_supply.shadow_state_root().unwrap());
+    }
+
+    #[test]
+    fn shadow_state_root_is_independent_of_insertion_order() {
+        let mut first = Ledger::default();
+        first.balances.insert("ana1b".into(), 2);
+        first.balances.insert("ana1a".into(), 1);
+        first.nonces.insert("ana1b".into(), 4);
+        first.nonces.insert("ana1a".into(), 3);
+
+        let mut second = Ledger::default();
+        second.balances.insert("ana1a".into(), 1);
+        second.balances.insert("ana1b".into(), 2);
+        second.nonces.insert("ana1a".into(), 3);
+        second.nonces.insert("ana1b".into(), 4);
+
+        assert_eq!(first.shadow_state_root().unwrap(), second.shadow_state_root().unwrap());
+    }
 
     #[test]
     fn median_time_past_uses_the_upper_median_of_recent_blocks() {
@@ -635,6 +704,12 @@ impl ChainState {
 
     pub fn tip(&self) -> &Block {
         self.blocks.last().expect("chain always contains genesis")
+    }
+
+    /// Return the current transparent ledger's experimental shadow commitment.
+    /// This value is diagnostic only and does not affect block validity.
+    pub fn shadow_state_root(&self) -> Result<String> {
+        self.ledger.shadow_state_root()
     }
 
     /// Compare a fully validated candidate chain using cumulative proof-of-work.

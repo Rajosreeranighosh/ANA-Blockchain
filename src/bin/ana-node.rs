@@ -2,11 +2,11 @@ use ana_blockchain::{validate_address, Block, ChainState, Ledger, Transaction};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex},
     thread,
@@ -121,11 +121,42 @@ fn chain_request(start: u64, sync_id: Option<String>) -> Message {
 }
 
 const MAX_CONNECTIONS: usize = 64;
+const MAX_CONNECTIONS_PER_WINDOW: usize = 30;
+const CONNECTION_RATE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_RATE_LIMIT_ENTRIES: usize = 256;
 const MAX_MEMPOOL_TRANSACTIONS: usize = 4_096;
 const MAX_SEEN_IDS: usize = 100_000;
 const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
+
+/// Bounded per-source connection-attempt limiter. Entries expire after one
+/// window; the map itself is capped so source churn cannot grow memory forever.
+#[derive(Default)]
+struct ConnectionRateLimiter {
+    attempts: HashMap<IpAddr, VecDeque<Instant>>,
+}
+
+impl ConnectionRateLimiter {
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let cutoff = now.checked_sub(CONNECTION_RATE_WINDOW).unwrap_or(now);
+        for attempts in self.attempts.values_mut() {
+            while attempts.front().is_some_and(|time| *time <= cutoff) {
+                attempts.pop_front();
+            }
+        }
+        self.attempts.retain(|_, attempts| !attempts.is_empty());
+        if !self.attempts.contains_key(&ip) && self.attempts.len() >= MAX_RATE_LIMIT_ENTRIES {
+            return false;
+        }
+        let attempts = self.attempts.entry(ip).or_default();
+        if attempts.len() >= MAX_CONNECTIONS_PER_WINDOW {
+            return false;
+        }
+        attempts.push_back(now);
+        true
+    }
+}
 
 /// The current peer protocol is plaintext TCP and carries no authenticated
 /// transport identity. Restrict listeners to loopback until mTLS is implemented.
@@ -720,9 +751,23 @@ fn main() -> Result<()> {
 
     let active_connections = Arc::new(AtomicUsize::new(0));
     let sync_sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut connection_rate = ConnectionRateLimiter::default();
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let source_ip = match stream.peer_addr() {
+                    Ok(address) => address.ip(),
+                    Err(error) => {
+                        eprintln!("Rejected connection with unavailable peer address: {error}");
+                        drop(stream);
+                        continue;
+                    }
+                };
+                if !connection_rate.allow(source_ip, Instant::now()) {
+                    eprintln!("Rejected connection: source rate limit reached");
+                    drop(stream);
+                    continue;
+                }
                 let current = active_connections.fetch_add(1, Ordering::SeqCst);
                 if current >= MAX_CONNECTIONS {
                     active_connections.fetch_sub(1, Ordering::SeqCst);
@@ -759,6 +804,31 @@ mod tests {
             "ana-{label}-{}.json",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn connection_rate_limiter_enforces_window_and_expires_old_attempts() {
+        let mut limiter = ConnectionRateLimiter::default();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let start = Instant::now();
+        for _ in 0..MAX_CONNECTIONS_PER_WINDOW {
+            assert!(limiter.allow(ip, start));
+        }
+        assert!(!limiter.allow(ip, start));
+        assert!(limiter.allow(ip, start + CONNECTION_RATE_WINDOW + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn connection_rate_limiter_caps_source_tracking() {
+        let mut limiter = ConnectionRateLimiter::default();
+        let start = Instant::now();
+        for value in 1..=MAX_RATE_LIMIT_ENTRIES {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(value as u32));
+            assert!(limiter.allow(ip, start));
+        }
+        let extra = IpAddr::V4(std::net::Ipv4Addr::from((MAX_RATE_LIMIT_ENTRIES + 1) as u32));
+        assert!(!limiter.allow(extra, start));
+        assert!(limiter.attempts.len() <= MAX_RATE_LIMIT_ENTRIES);
     }
 
     #[test]

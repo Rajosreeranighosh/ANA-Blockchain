@@ -373,6 +373,61 @@ mod tests {
     }
 
     #[test]
+    fn invalid_reorganization_candidate_leaves_active_chain_and_ledger_unchanged() {
+        let active_miner = SigningKey::generate(&mut OsRng);
+        let candidate_miner = SigningKey::generate(&mut OsRng);
+
+        let mut active = ChainState::new();
+        let active_block = active.mine_next(address(&active_miner.verifying_key())).unwrap();
+        active.append(active_block).unwrap();
+        let active_blocks = active.blocks.clone();
+        let active_root = active.shadow_state_root().unwrap();
+        let active_work = active.cumulative_work().unwrap();
+        let active_minted = active.ledger.minted;
+        let active_balances = active.ledger.balances.clone();
+        let active_nonces = active.ledger.nonces.clone();
+
+        let mut candidate = ChainState::new();
+        let mut invalid_block = candidate
+            .mine_next(address(&candidate_miner.verifying_key()))
+            .unwrap();
+        invalid_block.hash.push('0');
+        let mut invalid_blocks = candidate.blocks.clone();
+        invalid_blocks.push(invalid_block);
+
+        assert!(active.replace_if_more_work(invalid_blocks).is_err());
+        assert_eq!(active.blocks.len(), active_blocks.len());
+        assert_eq!(active.blocks[0].hash, active_blocks[0].hash);
+        assert_eq!(active.blocks[1].hash, active_blocks[1].hash);
+        assert_eq!(active.ledger.minted, active_minted);
+        assert_eq!(active.ledger.balances, active_balances);
+        assert_eq!(active.ledger.nonces, active_nonces);
+        assert_eq!(active.cumulative_work().unwrap(), active_work);
+        assert_eq!(active.shadow_state_root().unwrap(), active_root);
+    }
+
+    #[test]
+    fn lower_work_reorganization_candidate_does_not_replace_active_chain() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut active = ChainState::new();
+        let block = active.mine_next(address(&miner.verifying_key())).unwrap();
+        active.append(block).unwrap();
+
+        let active_blocks = active.blocks.clone();
+        let active_root = active.shadow_state_root().unwrap();
+        let active_work = active.cumulative_work().unwrap();
+        let active_minted = active.ledger.minted;
+
+        let lower_work_candidate = vec![genesis_block()];
+        assert!(!active.replace_if_more_work(lower_work_candidate).unwrap());
+        assert_eq!(active.blocks.len(), active_blocks.len());
+        assert_eq!(active.tip().hash, active_blocks.last().unwrap().hash);
+        assert_eq!(active.ledger.minted, active_minted);
+        assert_eq!(active.cumulative_work().unwrap(), active_work);
+        assert_eq!(active.shadow_state_root().unwrap(), active_root);
+    }
+
+    #[test]
     fn invalid_chain_load_is_rejected_without_trusting_stored_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tampered-chain.json");

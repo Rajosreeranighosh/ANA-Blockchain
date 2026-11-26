@@ -350,6 +350,29 @@ mod tests {
     }
 
     #[test]
+    fn chain_reorganization_replays_ledger_and_shadow_root_atomically() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut candidate = ChainState::new();
+        let block = candidate.mine_next(address(&miner.verifying_key())).unwrap();
+        candidate.append(block).unwrap();
+
+        let expected_root = candidate.shadow_state_root().unwrap();
+        let expected_blocks = candidate.blocks.clone();
+        let mut active = ChainState::new();
+
+        assert!(active.replace_if_more_work(expected_blocks.clone()).unwrap());
+        assert_eq!(active.blocks.len(), candidate.blocks.len());
+        assert_eq!(active.ledger.minted, candidate.ledger.minted);
+        assert_eq!(active.ledger.balances, candidate.ledger.balances);
+        assert_eq!(active.ledger.nonces, candidate.ledger.nonces);
+        assert_eq!(active.shadow_state_root().unwrap(), expected_root);
+
+        // The same equal-work chain must not trigger a second replacement.
+        assert!(!active.replace_if_more_work(expected_blocks).unwrap());
+        assert_eq!(active.shadow_state_root().unwrap(), expected_root);
+    }
+
+    #[test]
     fn invalid_chain_load_is_rejected_without_trusting_stored_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tampered-chain.json");

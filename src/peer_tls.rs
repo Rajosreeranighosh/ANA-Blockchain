@@ -38,7 +38,7 @@ pub fn network_id(network_name: &str) -> Result<String> {
         bail!("ANA network name must be non-empty and contain no NUL bytes");
     }
     let mut digest = Sha256::new();
-    digest.update(b"ANA-NETWORK-ID-v1\\0");
+    digest.update(b"ANA-NETWORK-ID-v1\0");
     digest.update(network_name.as_bytes());
     Ok(hex::encode(digest.finalize()))
 }
@@ -284,7 +284,7 @@ mod tests {
     fn malformed_der_and_invalid_network_name_are_rejected() {
         assert!(verify_peer_identity(b"not a certificate", "testnet", None).is_err());
         assert!(network_id("").is_err());
-        assert!(network_id("bad\\0network").is_err());
+        assert!(network_id("bad\0network").is_err());
     }
 
     #[test]

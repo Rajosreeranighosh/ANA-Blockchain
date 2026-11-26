@@ -25,9 +25,11 @@ jobs:
       - name: Report dependency paths for unmaintained crates
         shell: bash
         run: |
+          # Include every target so Windows-only and platform-specific paths are
+          # visible even when this audit job runs on Ubuntu.
           for crate in clear_on_drop paste ttf-parser; do
-            echo "::group::Dependency path: $crate"
-            cargo tree --locked --invert "$crate" || true
+            echo "::group::Dependency path (all targets): $crate"
+            cargo tree --locked --target all --invert "$crate" || true
             echo "::endgroup::"
           done
       - name: Install cargo-audit

@@ -73,7 +73,7 @@ fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
     }
 
     println!("Initializing RandomX light-mode cache (about 256 MiB)...");
-    let flags = RandomXFlag::get_recommended_flags();
+    let flags = RandomXFlag::default();
     let cache = RandomXCache::new(flags, DEV_RANDOMX_KEY)
         .context("failed to initialize RandomX cache")?;
     let vm = RandomXVM::new(flags, Some(cache), None)
@@ -90,10 +90,10 @@ fn mine_randomx_block(previous: &Block, difficulty: u16) -> Result<Block> {
 
     loop {
         let input = header_bytes(&header)?;
-        let hash = vm.calculate_hash(&input).context("RandomX hashing failed")?;
-        let hash: [u8; 32] = hash
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("RandomX returned a hash with an invalid length"))?;
+        let digest = vm.calculate_hash(&input)
+            .context("RandomX hash calculation failed")?;
+        let hash: [u8; 32] = digest.try_into()
+            .map_err(|_| anyhow::anyhow!("RandomX returned an invalid digest length"))?;
         if meets_target(&hash, difficulty) {
             return Ok(Block {
                 header,

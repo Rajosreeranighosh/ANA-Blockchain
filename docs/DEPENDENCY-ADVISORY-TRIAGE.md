@@ -11,15 +11,17 @@ claim the dependencies are secure or that the warnings are fixed.
 | Advisory | Resolved dependency path | Current decision |
 | --- | --- | --- |
 | RUSTSEC-2026-0283 (`clear_on_drop` 0.2.5) | `ana-blockchain -> bulletproofs 5.0.0 -> clear_on_drop` | Do not patch cryptographic internals ad hoc. Evaluate a maintained Bulletproofs implementation/fork with test vectors and independent review before replacement. |
-| RUSTSEC-2024-0436 (`paste` 1.0.15) | Present in the generated lockfile; `cargo tree --target all --edges all --invert paste` did not identify an active dependency path at last review. | Investigate lockfile/optional/target-only origin. Do not add a blanket ignore. |
+| RUSTSEC-2024-0436 (`paste` 1.0.15) | Present in the generated lockfile and downloaded by CI, but `cargo tree --locked --target all --edges all --invert paste` returned `nothing to print` in run `45768490749`; no active dependency path was established. | Treat as an unresolved lockfile/optional-dependency advisory. Identify which locked package declares it before attempting removal; do not claim it is unused or add a blanket ignore. |
 | RUSTSEC-2026-0192 (`ttf-parser` 0.25.1) | `eframe 0.31.1 -> egui 0.31.1 -> epaint 0.31.1 -> ab_glyph 0.2.32 -> owned_ttf_parser 0.25.1 -> ttf-parser` | Evaluate a tested GUI stack migration. Do not remove font support without confirming the wallet remains usable on Windows and Linux. |
 
 ## CI policy
 
-The workflow blocks RustSec vulnerability, unsound-code, and yanked-package
-findings. Unmaintained advisories remain printed in the job log but are not
-treated as confirmed vulnerabilities. This is a temporary, explicit risk
-triage policy, not a green security certification.
+The workflow passed on commit `465891c4ec544fedcc4e16ece5906a36960fc87e`
+(run `45768490749`). The audit reported three allowed `unmaintained` warnings:
+`clear_on_drop` 0.2.5, `paste` 1.0.15, and `ttf-parser` 0.25.1. It blocks
+RustSec vulnerability, unsound-code, and yanked-package findings. The pass is
+therefore a successful policy/command check, not a clean advisory report or a
+security certification. Unmaintained advisories remain visible and tracked.
 
 ## Exit criteria
 

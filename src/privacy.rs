@@ -107,11 +107,14 @@ impl PrivacyTransactionV1 {
                 bail!("privacy input CLSAG data is missing or too large");
             }
 
-            let mut ring_members = HashSet::with_capacity(input.ring.len());
+            let mut previous_index = None;
             for member in &input.ring {
-                if !ring_members.insert(member.global_index) {
-                    bail!("privacy input ring contains a duplicate output");
+                if let Some(previous) = previous_index {
+                    if member.global_index <= previous {
+                        bail!("privacy input ring members must be strictly increasing");
+                    }
                 }
+                previous_index = Some(member.global_index);
             }
         }
 
@@ -390,6 +393,20 @@ mod tests {
         tx.inputs[0].ring.pop();
         assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
 
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].ring[1].global_index = tx.inputs[0].ring[0].global_index;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn privacy_v1_rejects_unsorted_ring_members() {
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].ring.swap(0, 1);
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn privacy_v1_rejects_duplicate_ring_members_even_when_adjacent() {
         let mut tx = structurally_valid_transaction();
         tx.inputs[0].ring[1].global_index = tx.inputs[0].ring[0].global_index;
         assert!(tx.validate_structure("ANA-TESTNET-1").is_err());

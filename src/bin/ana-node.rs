@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     env,
-    fs::{self, OpenOptions},
+    fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
@@ -124,7 +124,6 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_MEMPOOL_TRANSACTIONS: usize = 4_096;
 const MAX_SEEN_IDS: usize = 100_000;
 const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
-static MEMPOOL_TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
 
@@ -256,27 +255,17 @@ fn persist_mempool(pool: &Mempool, path: &Path) -> Result<()> {
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    // Unique create_new files prevent concurrent writers from truncating the
-    // same temporary snapshot or reusing stale temporary files.
-    let sequence = MEMPOOL_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let file_name = path.file_name().context("mempool path has no file name")?;
-    let temp_name = format!("{}.tmp.{}.{}", file_name.to_string_lossy(), std::process::id(), sequence);
-    let temp = path.with_file_name(temp_name);
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)
-            .with_context(|| format!("could not create temporary mempool file {}", temp.display()))?;
-        file.write_all(&serialized)?;
-        file.sync_all().context("could not sync temporary mempool snapshot")?;
-        drop(file);
-        fs::rename(&temp, path).with_context(|| {
-            format!("could not atomically replace mempool snapshot {}", path.display())
-        })?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
+    // NamedTempFile creates a unique file in the destination directory and
+    // persist() performs platform-specific replacement, including on Windows.
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .context("could not create temporary mempool snapshot")?;
+    temp.write_all(&serialized)?;
+    temp.as_file().sync_all().context("could not sync temporary mempool snapshot")?;
+    temp.persist(path).map_err(|error| {
+        anyhow::anyhow!("could not atomically replace mempool snapshot {}: {}", path.display(), error.error)
+    })?;
+    Ok(())
 }
 
 /// Read a file without trusting a prior metadata() size check. The extra byte

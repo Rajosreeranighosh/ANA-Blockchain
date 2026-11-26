@@ -138,6 +138,61 @@ fn valid_network_id(network: &str) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// In-memory experimental key-image registry for private-transaction testing.
+///
+/// This registry is NOT consensus state and is NOT persistent. Call
+/// `record_after_verification` only after a separate, audited verifier has
+/// validated the transaction's CLSAG/signature, range proofs, commitments,
+/// and balance. Structural validation alone is never sufficient to authorize
+/// a spend.
+#[derive(Clone, Debug, Default)]
+pub struct PrivacyKeyImageRegistryV1 {
+    spent: HashSet<[u8; 32]>,
+}
+
+impl PrivacyKeyImageRegistryV1 {
+    /// Check a transaction's key images without mutating the registry.
+    pub fn check_unspent(
+        &self,
+        tx: &PrivacyTransactionV1,
+        expected_network: &str,
+    ) -> Result<()> {
+        tx.validate_structure(expected_network)?;
+        for input in &tx.inputs {
+            if self.spent.contains(&input.key_image) {
+                bail!("privacy key image has already been spent");
+            }
+        }
+        Ok(())
+    }
+
+    /// Record key images after independent cryptographic verification.
+    ///
+    /// The operation is atomic: if any key image is already present, none of
+    /// this transaction's key images are inserted.
+    pub fn record_after_verification(
+        &mut self,
+        tx: &PrivacyTransactionV1,
+        expected_network: &str,
+    ) -> Result<()> {
+        self.check_unspent(tx, expected_network)?;
+        self.spent.extend(tx.inputs.iter().map(|input| input.key_image));
+        Ok(())
+    }
+
+    pub fn contains(&self, key_image: &[u8; 32]) -> bool {
+        self.spent.contains(key_image)
+    }
+
+    pub fn len(&self) -> usize {
+        self.spent.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spent.is_empty()
+    }
+}
+
 /// Public two-key address. The spend key controls outputs; the view key scans them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacyAddressV1 {
@@ -436,6 +491,47 @@ mod tests {
         let mut tx = structurally_valid_transaction();
         tx.inputs[0].ring[1].global_index = tx.inputs[0].ring[0].global_index;
         assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_rejects_replay_across_transactions() {
+        let tx = structurally_valid_transaction();
+        let key_image = tx.inputs[0].key_image;
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+
+        assert!(registry.check_unspent(&tx, "ANA-TESTNET-1").is_ok());
+        registry.record_after_verification(&tx, "ANA-TESTNET-1").unwrap();
+        assert!(registry.contains(&key_image));
+        assert_eq!(registry.len(), 1);
+        assert!(registry.check_unspent(&tx, "ANA-TESTNET-1").is_err());
+        assert!(registry
+            .record_after_verification(&tx, "ANA-TESTNET-1")
+            .is_err());
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn key_image_registry_recording_is_atomic_on_conflict() {
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        let existing = structurally_valid_transaction();
+        registry
+            .record_after_verification(&existing, "ANA-TESTNET-1")
+            .unwrap();
+
+        let mut candidate = structurally_valid_transaction();
+        candidate.inputs[0].key_image =
+            (ED25519_BASEPOINT_POINT * Scalar::from(2u64)).compress().to_bytes();
+        let mut conflicting = candidate.inputs[0].clone();
+        conflicting.key_image = existing.inputs[0].key_image;
+        conflicting.ring.iter_mut().for_each(|member| member.global_index += 100);
+        candidate.inputs.push(conflicting);
+
+        let new_key_image = candidate.inputs[0].key_image;
+        assert!(registry
+            .record_after_verification(&candidate, "ANA-TESTNET-1")
+            .is_err());
+        assert!(!registry.contains(&new_key_image));
+        assert_eq!(registry.len(), 1);
     }
 
     #[test]

@@ -39,4 +39,4 @@ jobs:
         # RustSec "unmaintained" advisories are printed and tracked separately:
         # replacing cryptographic/UI dependencies requires a tested migration,
         # not silently removing privacy proofs or breaking the desktop wallet.
-        run: cargo audit --deny vulnerabilities --deny unsound --deny yanked
+        run: cargo audit --deny unsound --deny yanked

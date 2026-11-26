@@ -1,0 +1,27 @@
+name: Generate Cargo.lock artifact
+
+on:
+  push:
+    branches:
+      - ana-mtls-transport-v1
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # stable
+        with:
+          toolchain: stable
+      - name: Resolve and generate lockfile
+        run: cargo generate-lockfile
+      - name: Upload lockfile artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ana-cargo-lockfile
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1

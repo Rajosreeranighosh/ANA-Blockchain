@@ -135,3 +135,37 @@ Commit generated test-only CA, valid node certificates, and CRLs under a test-fi
 - Wrong EKU, wrong key usage, expired/not-yet-valid certificate, untrusted issuer, revoked serial, expired CRL, and wrong-issuer CRL rejection.
 - A valid certificate issued for one network being rejected by another network.
 
+
+
+## 8. Pinned rustls 0.23 implementation notes
+
+The initial dependency pins are recorded in `Cargo.toml`:
+
+- `rustls = 0.23.44`, with the `ring` and `std` features and default features disabled.
+- `rustls-pemfile = 2.2.0` for PEM decoding only.
+- `x509-parser = 0.17.0` for parsing and enforcing the ANA URI subject-alternative-name identity after normal certificate-chain validation.
+
+The implementation must use rustls' standard WebPKI verifiers on both sides. The server must construct a `rustls::server::WebPkiClientVerifier` from the explicitly configured CA root store and install it with `ServerConfig::builder().with_client_cert_verifier(...)`. The client must construct a `rustls::client::WebPkiServerVerifier` from its explicit CA root store and install it with `ClientConfig::builder().with_webpki_verifier(...)`. Do not use `allow_unauthenticated`, `no_client_auth`, a custom accept-all verifier, or an empty trust store.
+
+Where CRLs are configured, load and parse the complete configured CRL set and pass it to both verifier builders using `with_crls`. Missing, unreadable, malformed, or empty-required CRL configuration must prevent the transport from starting. The deployment policy must explicitly choose revocation depth and unknown-status behavior; unknown status is a rejection, not an implicit allow. CRL freshness/expiry must be tested with a fixed test clock or generated fixtures and must fail closed. Do not assume that merely calling `with_crls` implements every operational freshness policy.
+
+After chain validation, parse the authenticated peer certificate and require exactly the configured ANA network identity in the URI SAN. Reject absent, malformed, duplicate, or mismatched ANA URI SANs. Do not infer identity from the common name, DNS SAN, IP SAN, socket address, or the legacy shared token. Define and test the canonical network/node URI encoding before enabling peers.
+
+## 9. Required negative-test matrix
+
+The transport test suite must exercise both client and server verification paths and assert handshake failure (not merely an application-layer rejection) for:
+
+1. No client certificate when the server requires mTLS.
+2. No server certificate / plaintext peer attempting to speak the JSON protocol.
+3. Certificate signed by an untrusted CA.
+4. Expired and not-yet-valid leaf certificate.
+5. Revoked leaf certificate.
+6. Missing, expired, malformed, or unusable CRL configuration when revocation is mandatory.
+7. Unknown revocation status under the configured fail-closed policy.
+8. Correctly CA-signed certificate with missing, malformed, duplicate, wrong-network, or wrong-node URI SAN.
+9. Certificate valid for a different ANA network.
+10. Wrong ALPN and TLS versions below TLS 1.3.
+
+Positive tests must prove two distinct node certificates issued by the configured test CA can establish TLS 1.3 in both directions, negotiate only `ana-peer/1`, and exchange the existing newline-delimited messages without changing their serialization. Include a multi-node gossip integration test and run all tests on Windows and Ubuntu.
+
+These tests are a release gate. Until the lockfile is committed, the implementation compiles on both CI platforms, and this matrix passes, the loopback-only restrictions remain mandatory and the design remains unapproved for public testnet use.

@@ -110,3 +110,28 @@ Do not enable public peer binds until all of the following are true:
 6. A multi-operator testnet demonstrates recovery from certificate expiry, rotation, and revocation.
 
 Even after these gates, transport security does not establish consensus safety or mainnet readiness.
+
+## 9. Fixed node certificate profile (proposal)
+
+The following profile removes ambiguity from the initial implementation. It remains a proposal until the implementation and test vectors exist.
+
+- Certificates use X.509 v3, ECDSA P-256 keys, SHA-256 signatures, and a maximum validity of 90 days. Private keys are generated per node and must never be shared.
+- The issuing CA certificate is a dedicated ANA network CA with `basicConstraints = critical, CA:TRUE` and `keyCertSign,cRLSign` key usage. The CA private key is kept offline.
+- A node certificate has `basicConstraints = critical, CA:FALSE`, critical `digitalSignature` key usage, and both `clientAuth` and `serverAuth` extended key usages. RSA, Ed25519, wildcard DNS identities, and certificates without the required extensions are rejected in the first profile.
+- The node identity is the lowercase hex SHA-256 digest of the DER-encoded SubjectPublicKeyInfo (SPKI). The URI SAN is exactly `ana://<network-id>/<node-id>`, with no query, fragment, port, percent-encoding, or additional path segment.
+- `network-id` is the lowercase hex SHA-256 digest of UTF-8 bytes `ANA-NETWORK-ID-v1\0<network-name>`. The configured network name must exactly equal the chain's compiled network identifier; it is not accepted from the peer message.
+- Verification must compare the URI SAN network ID to the local configured network ID and recompute the node ID from the certificate public key. It must reject missing, duplicate, malformed, or mismatched URI SANs. DNS names and common names are not identity fallbacks.
+- Certificate validity is checked against the system clock with no more than 60 seconds of clock skew. The certificate chain must terminate at the explicitly configured network CA.
+
+### Revocation profile
+
+The first implementation must use an operator-distributed, signed X.509 CRL for the network CA. Nodes must require a configured CRL, verify its signature and issuer, enforce its `thisUpdate` and `nextUpdate` window, and reject certificates listed as revoked. A missing, invalid, or expired CRL is a fail-closed configuration error for remote peer mode. CRL refresh and emergency distribution are operator responsibilities and must be documented. Until this mechanism is implemented and tested, remote peer mode remains disabled.
+
+### Required identity test vectors
+
+Commit generated test-only CA, valid node certificates, and CRLs under a test-fixtures directory; never use production private keys. Tests must cover:
+- SPKI-to-node-ID and network-name-to-network-ID known-answer vectors.
+- Correct URI SAN acceptance and wrong-network / wrong-key / malformed / duplicate SAN rejection.
+- Wrong EKU, wrong key usage, expired/not-yet-valid certificate, untrusted issuer, revoked serial, expired CRL, and wrong-issuer CRL rejection.
+- A valid certificate issued for one network being rejected by another network.
+

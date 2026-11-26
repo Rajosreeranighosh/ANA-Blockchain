@@ -142,19 +142,25 @@ fn validate_bind_security(bind: &str) -> Result<()> {
     bail!("refusing non-loopback bind: peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
 }
 
-/// Outbound peers must obey the same loopback-only safety boundary as listeners.
-/// Otherwise this node could leak transactions or peer metadata over plaintext TCP.
-fn validate_peer_security(peer: &str) -> Result<()> {
+/// Resolve an outbound peer immediately before connecting and enforce the
+/// loopback-only boundary on the exact socket address used. Rechecking at send
+/// time prevents DNS changes after startup validation from bypassing the guard.
+fn resolve_loopback_peer(peer: &str) -> Result<std::net::SocketAddr> {
     let addresses: Vec<_> = peer.to_socket_addrs()
         .with_context(|| format!("could not resolve configured peer {peer}"))?
         .collect();
     if addresses.is_empty() {
         bail!("configured peer {peer} resolved to no socket addresses");
     }
-    if addresses.iter().all(|address| address.ip().is_loopback()) {
-        return Ok(());
+    if !addresses.iter().all(|address| address.ip().is_loopback()) {
+        bail!("refusing non-loopback peer {peer}: outbound peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
     }
-    bail!("refusing non-loopback peer {peer}: outbound peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
+    Ok(addresses[0])
+}
+
+/// Validate configured peers at startup so invalid remote addresses fail fast.
+fn validate_peer_security(peer: &str) -> Result<()> {
+    resolve_loopback_peer(peer).map(|_| ())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -196,9 +202,12 @@ impl Drop for ConnectionGuard {
 
 
 fn send(peer: &str, message: &Message) {
-    let address = match peer.to_socket_addrs().ok().and_then(|mut values| values.next()) {
-        Some(value) => value,
-        None => return,
+    let address = match resolve_loopback_peer(peer) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Refusing outbound peer connection: {error}");
+            return;
+        }
     };
     if let Ok(mut stream) = TcpStream::connect_timeout(
         &address,
@@ -781,9 +790,11 @@ mod tests {
     fn outbound_peer_transport_allows_loopback_only() {
         assert!(validate_peer_security("127.0.0.1:18080").is_ok());
         assert!(validate_peer_security("[::1]:18080").is_ok());
+        assert!(validate_peer_security("localhost:18080").is_ok());
         assert!(validate_peer_security("0.0.0.0:18080").is_err());
         assert!(validate_peer_security("[::]:18080").is_err());
         assert!(validate_peer_security("192.0.2.1:18080").is_err());
+        assert!(resolve_loopback_peer("192.0.2.1:18080").is_err());
     }
 
     #[test]

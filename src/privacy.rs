@@ -128,6 +128,16 @@ impl PrivacyTransactionV1 {
 }
 
 
+/// Network identifiers are deliberately restricted so address encodings
+/// cannot be made ambiguous by separators, whitespace, or Unicode lookalikes.
+fn valid_network_id(network: &str) -> bool {
+    !network.is_empty()
+        && network.len() <= 64
+        && network
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 /// Public two-key address. The spend key controls outputs; the view key scans them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacyAddressV1 {
@@ -138,7 +148,10 @@ pub struct PrivacyAddressV1 {
 
 impl PrivacyAddressV1 {
     pub fn validate(&self, expected_network: &str) -> Result<()> {
-        if self.network != expected_network || self.network.contains(':') {
+        if !valid_network_id(&self.network)
+            || !valid_network_id(expected_network)
+            || self.network != expected_network
+        {
             bail!("privacy address belongs to another network or has invalid network text");
         }
         validate_compressed_point(&self.spend_public, "address spend public key")?;
@@ -336,6 +349,19 @@ mod tests {
         let output = create_stealth_output(wallet.address(), "ANA-TESTNET-1", 5).unwrap();
         assert!(wallet.scan_output(6, &output).unwrap().is_none());
         assert!(wallet.scan_output(5, &output).unwrap().is_some());
+    }
+
+    #[test]
+    fn privacy_address_rejects_ambiguous_or_noncanonical_network_ids() {
+        let wallet = PrivacyWalletKeysV1::generate("ANA-TESTNET-1").unwrap();
+        let mut address = wallet.address().clone();
+        for invalid in ["", "ana-testnet-1", "ANA:TESTNET", "ANA TESTNET", "ANA_1", "ＡＮＡ"] {
+            address.network = invalid.to_owned();
+            assert!(address.validate("ANA-TESTNET-1").is_err(), "accepted {invalid:?}");
+        }
+        address.network = "A".repeat(65);
+        assert!(address.validate("ANA-TESTNET-1").is_err());
+        assert!(wallet.address().validate("ana-testnet-1").is_err());
     }
 
     #[test]

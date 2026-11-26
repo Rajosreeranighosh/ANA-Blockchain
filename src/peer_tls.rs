@@ -8,7 +8,7 @@
 use anyhow::{bail, Context, Result};
 use rustls::{
     client::WebPkiServerVerifier,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    pki_types::{CertificateDer, CertificateRevocationListDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
     ClientConfig, RootCertStore, ServerConfig,
 };
@@ -53,7 +53,7 @@ fn read_trust_roots(path: &Path) -> Result<Arc<RootCertStore>> {
     Ok(Arc::new(roots))
 }
 
-fn read_required_crls(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+fn read_required_crls(path: &Path) -> Result<Vec<CertificateRevocationListDer<'static>>> {
     let file = File::open(path)
         .with_context(|| format!("could not open required ANA CRL file {}", path.display()))?;
     let crls = rustls_pemfile::crls(&mut BufReader::new(file))
@@ -62,7 +62,7 @@ fn read_required_crls(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     if crls.is_empty() {
         bail!("remote peer TLS requires at least one configured CRL");
     }
-    Ok(crls.into_iter().map(|crl| crl.into()).collect())
+    Ok(crls)
 }
 
 /// Build a TLS 1.3 server configuration that requires a CA-validated client

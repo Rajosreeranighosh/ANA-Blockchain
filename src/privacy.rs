@@ -154,13 +154,13 @@ struct PrivacyKeyImageStoreV1 {
     key_images: Vec<[u8; 32]>,
 }
 
-/// In-memory experimental key-image registry for private-transaction testing.
+/// Experimental local key-image registry for unit tests only.
 ///
-/// This registry is NOT consensus state and is NOT persistent. Call
-/// `record_after_verification` only after a separate, audited verifier has
-/// validated the transaction's CLSAG/signature, range proofs, commitments,
-/// and balance. Structural validation alone is never sufficient to authorize
-/// a spend.
+/// This registry is NOT consensus state. Its snapshot persistence is local
+/// test storage, not rollback-resistant or consensus-grade state. It must not
+/// be used to authorize a spend or integrated into block validation. The
+/// mutation helper is compiled only for unit tests because no audited
+/// cryptographic verifier currently produces a verified-transaction type.
 #[derive(Clone, Debug, Default)]
 pub struct PrivacyKeyImageRegistryV1 {
     spent: HashSet<[u8; 32]>,
@@ -186,10 +186,12 @@ impl PrivacyKeyImageRegistryV1 {
         Ok(())
     }
 
-    /// Record key images after independent cryptographic verification.
+    /// Test helper only: production code cannot record unverified transactions.
     ///
-    /// The operation is atomic: if any key image is already present, none of
-    /// this transaction's key images are inserted.
+    /// This deliberately accepts the structural test fixture; it is not a
+    /// cryptographic verification boundary and must remain test-only until a
+    /// verifier-backed transaction type is implemented.
+    #[cfg(test)]
     pub fn record_after_verification(
         &mut self,
         tx: &PrivacyTransactionV1,

@@ -116,6 +116,9 @@ fn chain_request(start: u64, sync_id: Option<String>) -> Message {
 }
 
 const MAX_CONNECTIONS: usize = 64;
+const MAX_MEMPOOL_TRANSACTIONS: usize = 4_096;
+const MAX_SEEN_IDS: usize = 100_000;
+const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
 
@@ -213,11 +216,18 @@ fn persist_mempool(pool: &Mempool, path: &Path) -> Result<()> {
     let snapshot = pool.lock()
         .map_err(|_| anyhow::anyhow!("mempool lock poisoned"))?
         .clone();
+    if snapshot.len() > MAX_MEMPOOL_TRANSACTIONS {
+        bail!("mempool exceeds the configured transaction limit");
+    }
+    let serialized = serde_json::to_vec_pretty(&snapshot)?;
+    if serialized.len() as u64 > MAX_MEMPOOL_FILE_BYTES {
+        bail!("mempool snapshot exceeds the configured file-size limit");
+    }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     let temp = path.with_extension("tmp");
-    fs::write(&temp, serde_json::to_vec_pretty(&snapshot)?)?;
+    fs::write(&temp, serialized)?;
     fs::rename(temp, path)?;
     Ok(())
 }
@@ -227,7 +237,14 @@ fn load_mempool(path: &Path, chain: &ChainState) -> Result<BTreeMap<String, Tran
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_MEMPOOL_FILE_BYTES {
+        bail!("mempool file exceeds the configured size limit");
+    }
     let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&fs::read(path)?)?;
+    if stored.len() > MAX_MEMPOOL_TRANSACTIONS {
+        bail!("mempool file exceeds the configured transaction limit");
+    }
     let mut candidates = BTreeMap::new();
     for (id, tx) in stored {
         if tx.verify().is_ok() && matches!(tx.id(), Ok(ref actual_id) if actual_id == &id) {
@@ -248,6 +265,17 @@ fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
     if let Err(error) = persist_mempool(pool, &path) {
         eprintln!("mempool persistence error: {error}");
     }
+}
+
+/// Bounded duplicate cache. Eviction is safe because ledger nonce, block linkage,
+/// and transaction validity checks remain authoritative on every acceptance.
+fn remember_seen(seen: &Seen, id: String) -> bool {
+    let Ok(mut values) = seen.lock() else { return false; };
+    if !values.insert(id) { return false; }
+    if values.len() > MAX_SEEN_IDS {
+        if let Some(oldest) = values.iter().next().cloned() { values.remove(&oldest); }
+    }
+    true
 }
 
 fn transaction_ack(id: &str, state: &str) -> Message {
@@ -477,7 +505,7 @@ fn handle(
         "block" => {
             if let Some(block) = message.block {
                 let id = block.hash.clone();
-                let first_seen = seen.lock().map(|mut values| values.insert(id)).unwrap_or(false);
+                let first_seen = remember_seen(&seen, id);
                 if !first_seen { return; }
                 let result = chain.lock()
                     .map_err(|_| anyhow::anyhow!("chain lock poisoned"))
@@ -517,6 +545,10 @@ fn handle(
                     return;
                 }
                 if let Ok(mut values) = pool.lock() {
+                    if values.len() >= MAX_MEMPOOL_TRANSACTIONS {
+                        response(&mut stream, &transaction_ack(&id, "mempool_full"));
+                        return;
+                    }
                     values.insert(id.clone(), tx.clone());
                 } else {
                     response(&mut stream, &transaction_ack(&id, "rejected"));
@@ -532,7 +564,7 @@ fn handle(
                     response(&mut stream, &transaction_ack(&id, "rejected"));
                     return;
                 }
-                if let Ok(mut values) = seen.lock() { values.insert(id.clone()); }
+                let _ = remember_seen(&seen, id.clone());
                 println!("Accepted pending transaction {id}");
                 persist_mempool_after_change(&pool, &data_file);
                 response(&mut stream, &transaction_ack(&id, "accepted"));
@@ -569,13 +601,13 @@ fn main() -> Result<()> {
         load_mempool(&mempool_file, &state)?
     };
     println!("Restored {} pending transaction(s) from {}", restored.len(), mempool_file.display());
-    let restored_ids: HashSet<String> = restored.keys().cloned().collect();
+    let restored_ids: HashSet<String> = restored.keys().cloned().take(MAX_SEEN_IDS).collect();
     let seen: Seen = Arc::new(Mutex::new(restored_ids));
     let pool: Mempool = Arc::new(Mutex::new(restored));
 
     let listener = TcpListener::bind(bind)?;
     println!("ANA TESTNET node listening on {bind}; {} configured peers", peers.len());
-    println!("Network safeguards: {MAX_CONNECTIONS} concurrent connections, {MAX_MESSAGE_BYTES} byte message cap, {SOCKET_TIMEOUT_SECS}s socket timeout.");
+    println!("Network safeguards: {MAX_CONNECTIONS} concurrent connections, {MAX_MESSAGE_BYTES} byte message cap, {MAX_MEMPOOL_TRANSACTIONS} pending transaction cap, {MAX_SEEN_IDS} duplicate-cache cap, {SOCKET_TIMEOUT_SECS}s socket timeout.");
     if peer_token().is_none() { println!("WARNING: ANA_PEER_TOKEN is unset; inbound connections are restricted to loopback."); }
     println!("RandomX testnet difficulty: starts at 8 bits; retargets every 10 completed blocks toward a 30-second target.");
     for peer in peers.iter() {

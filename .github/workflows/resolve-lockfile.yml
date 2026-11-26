@@ -1,0 +1,29 @@
+name: Resolve pinned Rust dependency lockfile
+
+on:
+  push:
+    branches: [ana-mtls-transport-v1]
+
+permissions:
+  contents: write
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ana-mtls-transport-v1
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # stable
+      - name: Resolve and commit Cargo.lock
+        run: |
+          cargo generate-lockfile
+          cargo metadata --locked --format-version 1 > /dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "Lock pinned TLS dependency graph"
+            git push origin HEAD:ana-mtls-transport-v1
+          fi

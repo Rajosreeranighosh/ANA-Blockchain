@@ -2,11 +2,11 @@ use ana_blockchain::{validate_address, Block, ChainState, Ledger, Transaction};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     env,
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex},
     thread,
@@ -51,7 +51,12 @@ struct NodeStatus {
 
 type SharedChain = Arc<Mutex<ChainState>>;
 type Peers = Arc<Vec<String>>;
-type Seen = Arc<Mutex<HashSet<String>>>;
+#[derive(Default)]
+struct SeenCache {
+    ids: HashSet<String>,
+    insertion_order: VecDeque<String>,
+}
+type Seen = Arc<Mutex<SeenCache>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
 type SyncSessions = Arc<Mutex<BTreeMap<String, SyncSession>>>;
 struct SyncSession { blocks: Vec<Block>, last_updated: Instant }
@@ -116,12 +121,46 @@ fn chain_request(start: u64, sync_id: Option<String>) -> Message {
 }
 
 const MAX_CONNECTIONS: usize = 64;
+const MAX_CONNECTIONS_PER_WINDOW: usize = 30;
+const CONNECTION_RATE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_RATE_LIMIT_ENTRIES: usize = 256;
+const MAX_MEMPOOL_TRANSACTIONS: usize = 4_096;
+const MAX_SEEN_IDS: usize = 100_000;
+const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
 
-/// Refuse accidental remote exposure: this prototype has no TLS, so remote
-/// binds require both the shared token and an explicit insecure-transport opt-in.
-fn validate_bind_security(bind: &str, has_token: bool, allow_insecure_remote: bool) -> Result<()> {
+/// Bounded per-source connection-attempt limiter. Entries expire after one
+/// window; the map itself is capped so source churn cannot grow memory forever.
+#[derive(Default)]
+struct ConnectionRateLimiter {
+    attempts: HashMap<IpAddr, VecDeque<Instant>>,
+}
+
+impl ConnectionRateLimiter {
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let cutoff = now.checked_sub(CONNECTION_RATE_WINDOW).unwrap_or(now);
+        for attempts in self.attempts.values_mut() {
+            while attempts.front().is_some_and(|time| *time <= cutoff) {
+                attempts.pop_front();
+            }
+        }
+        self.attempts.retain(|_, attempts| !attempts.is_empty());
+        if !self.attempts.contains_key(&ip) && self.attempts.len() >= MAX_RATE_LIMIT_ENTRIES {
+            return false;
+        }
+        let attempts = self.attempts.entry(ip).or_default();
+        if attempts.len() >= MAX_CONNECTIONS_PER_WINDOW {
+            return false;
+        }
+        attempts.push_back(now);
+        true
+    }
+}
+
+/// The current peer protocol is plaintext TCP and carries no authenticated
+/// transport identity. Restrict listeners to loopback until mTLS is implemented.
+fn validate_bind_security(bind: &str) -> Result<()> {
     let addresses: Vec<_> = bind.to_socket_addrs()
         .context("could not resolve node bind address")?
         .collect();
@@ -131,14 +170,28 @@ fn validate_bind_security(bind: &str, has_token: bool, allow_insecure_remote: bo
     if addresses.iter().all(|address| address.ip().is_loopback()) {
         return Ok(());
     }
-    if !has_token {
-        bail!("refusing non-loopback bind without ANA_PEER_TOKEN; bind to loopback or configure peer authentication");
+    bail!("refusing non-loopback bind: peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
+}
+
+/// Resolve an outbound peer immediately before connecting and enforce the
+/// loopback-only boundary on the exact socket address used. Rechecking at send
+/// time prevents DNS changes after startup validation from bypassing the guard.
+fn resolve_loopback_peer(peer: &str) -> Result<std::net::SocketAddr> {
+    let addresses: Vec<_> = peer.to_socket_addrs()
+        .with_context(|| format!("could not resolve configured peer {peer}"))?
+        .collect();
+    if addresses.is_empty() {
+        bail!("configured peer {peer} resolved to no socket addresses");
     }
-    if !allow_insecure_remote {
-        bail!("refusing remote bind over plaintext TCP; use a VPN/SSH tunnel or set ANA_ALLOW_INSECURE_REMOTE_BIND=1 only on a trusted private network");
+    if !addresses.iter().all(|address| address.ip().is_loopback()) {
+        bail!("refusing non-loopback peer {peer}: outbound peer transport is plaintext and unauthenticated; use loopback with a trusted VPN/SSH tunnel until encrypted peer transport is implemented");
     }
-    eprintln!("SECURITY WARNING: remote node transport is plaintext TCP; the shared peer token is not encrypted");
-    Ok(())
+    Ok(addresses[0])
+}
+
+/// Validate configured peers at startup so invalid remote addresses fail fast.
+fn validate_peer_security(peer: &str) -> Result<()> {
+    resolve_loopback_peer(peer).map(|_| ())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -180,9 +233,12 @@ impl Drop for ConnectionGuard {
 
 
 fn send(peer: &str, message: &Message) {
-    let address = match peer.to_socket_addrs().ok().and_then(|mut values| values.next()) {
-        Some(value) => value,
-        None => return,
+    let address = match resolve_loopback_peer(peer) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("Refusing outbound peer connection: {error}");
+            return;
+        }
     };
     if let Ok(mut stream) = TcpStream::connect_timeout(
         &address,
@@ -220,13 +276,39 @@ fn persist_mempool(pool: &Mempool, path: &Path) -> Result<()> {
     let snapshot = pool.lock()
         .map_err(|_| anyhow::anyhow!("mempool lock poisoned"))?
         .clone();
+    if snapshot.len() > MAX_MEMPOOL_TRANSACTIONS {
+        bail!("mempool exceeds the configured transaction limit");
+    }
+    let serialized = serde_json::to_vec_pretty(&snapshot)?;
+    if serialized.len() as u64 > MAX_MEMPOOL_FILE_BYTES {
+        bail!("mempool snapshot exceeds the configured file-size limit");
+    }
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension("tmp");
-    fs::write(&temp, serde_json::to_vec_pretty(&snapshot)?)?;
-    fs::rename(temp, path)?;
+    // NamedTempFile creates a unique file in the destination directory and
+    // persist() performs platform-specific replacement, including on Windows.
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .context("could not create temporary mempool snapshot")?;
+    temp.write_all(&serialized)?;
+    temp.as_file().sync_all().context("could not sync temporary mempool snapshot")?;
+    temp.persist(path).map_err(|error| {
+        anyhow::anyhow!("could not atomically replace mempool snapshot {}: {}", path.display(), error.error)
+    })?;
     Ok(())
+}
+
+/// Read a file without trusting a prior metadata() size check. The extra byte
+/// detects oversized files even if they grow while being read.
+fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        bail!("file exceeds the configured size limit");
+    }
+    Ok(bytes)
 }
 
 /// Load only correctly keyed, correctly signed, currently executable transactions.
@@ -234,7 +316,12 @@ fn load_mempool(path: &Path, chain: &ChainState) -> Result<BTreeMap<String, Tran
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&fs::read(path)?)?;
+    let bytes = read_bounded_file(path, MAX_MEMPOOL_FILE_BYTES)
+        .context("could not safely read mempool file")?;
+    let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&bytes)?;
+    if stored.len() > MAX_MEMPOOL_TRANSACTIONS {
+        bail!("mempool file exceeds the configured transaction limit");
+    }
     let mut candidates = BTreeMap::new();
     for (id, tx) in stored {
         if tx.verify().is_ok() && matches!(tx.id(), Ok(ref actual_id) if actual_id == &id) {
@@ -255,6 +342,20 @@ fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
     if let Err(error) = persist_mempool(pool, &path) {
         eprintln!("mempool persistence error: {error}");
     }
+}
+
+/// Bounded FIFO duplicate cache. Eviction is safe because ledger nonce, block
+/// linkage, and transaction validity checks remain authoritative on acceptance.
+fn remember_seen(seen: &Seen, id: String) -> bool {
+    let Ok(mut cache) = seen.lock() else { return false; };
+    if !cache.ids.insert(id.clone()) { return false; }
+    cache.insertion_order.push_back(id);
+    if cache.ids.len() > MAX_SEEN_IDS {
+        if let Some(oldest) = cache.insertion_order.pop_front() {
+            cache.ids.remove(&oldest);
+        }
+    }
+    true
 }
 
 fn transaction_ack(id: &str, state: &str) -> Message {
@@ -484,7 +585,7 @@ fn handle(
         "block" => {
             if let Some(block) = message.block {
                 let id = block.hash.clone();
-                let first_seen = seen.lock().map(|mut values| values.insert(id)).unwrap_or(false);
+                let first_seen = remember_seen(&seen, id);
                 if !first_seen { return; }
                 let result = chain.lock()
                     .map_err(|_| anyhow::anyhow!("chain lock poisoned"))
@@ -519,11 +620,15 @@ fn handle(
                     response(&mut stream, &transaction_ack(&id, "rejected"));
                     return;
                 }
-                if seen.lock().map(|values| values.contains(&id)).unwrap_or(true) {
+                if seen.lock().map(|cache| cache.ids.contains(&id)).unwrap_or(true) {
                     response(&mut stream, &transaction_ack(&id, "already_known"));
                     return;
                 }
                 if let Ok(mut values) = pool.lock() {
+                    if values.len() >= MAX_MEMPOOL_TRANSACTIONS {
+                        response(&mut stream, &transaction_ack(&id, "mempool_full"));
+                        return;
+                    }
                     values.insert(id.clone(), tx.clone());
                 } else {
                     response(&mut stream, &transaction_ack(&id, "rejected"));
@@ -539,7 +644,7 @@ fn handle(
                     response(&mut stream, &transaction_ack(&id, "rejected"));
                     return;
                 }
-                if let Ok(mut values) = seen.lock() { values.insert(id.clone()); }
+                let _ = remember_seen(&seen, id.clone());
                 println!("Accepted pending transaction {id}");
                 persist_mempool_after_change(&pool, &data_file);
                 response(&mut stream, &transaction_ack(&id, "accepted"));
@@ -567,9 +672,12 @@ fn main() -> Result<()> {
         validate_address(&args[3])?;
         Some(args[3].clone())
     };
-    let peers: Peers = Arc::new(args.iter().skip(4).cloned().collect());
-    let allow_remote = env::var("ANA_ALLOW_INSECURE_REMOTE_BIND").as_deref() == Ok("1");
-    validate_bind_security(bind, peer_token().is_some(), allow_remote)?;
+    let configured_peers: Vec<String> = args.iter().skip(4).cloned().collect();
+    validate_bind_security(bind)?;
+    for peer in &configured_peers {
+        validate_peer_security(peer)?;
+    }
+    let peers: Peers = Arc::new(configured_peers);
     let chain = Arc::new(Mutex::new(ChainState::load(&data_file)?));
     let mempool_file = mempool_path(&data_file);
     let restored = {
@@ -577,13 +685,17 @@ fn main() -> Result<()> {
         load_mempool(&mempool_file, &state)?
     };
     println!("Restored {} pending transaction(s) from {}", restored.len(), mempool_file.display());
-    let restored_ids: HashSet<String> = restored.keys().cloned().collect();
-    let seen: Seen = Arc::new(Mutex::new(restored_ids));
+    let mut restored_seen = SeenCache::default();
+    for id in restored.keys().take(MAX_SEEN_IDS) {
+        restored_seen.ids.insert(id.clone());
+        restored_seen.insertion_order.push_back(id.clone());
+    }
+    let seen: Seen = Arc::new(Mutex::new(restored_seen));
     let pool: Mempool = Arc::new(Mutex::new(restored));
 
     let listener = TcpListener::bind(bind)?;
     println!("ANA TESTNET node listening on {bind}; {} configured peers", peers.len());
-    println!("Network safeguards: {MAX_CONNECTIONS} concurrent connections, {MAX_MESSAGE_BYTES} byte message cap, {SOCKET_TIMEOUT_SECS}s socket timeout.");
+    println!("Network safeguards: {MAX_CONNECTIONS} concurrent connections, {MAX_MESSAGE_BYTES} byte message cap, {MAX_MEMPOOL_TRANSACTIONS} pending transaction cap, {MAX_SEEN_IDS} duplicate-cache cap, {SOCKET_TIMEOUT_SECS}s socket timeout.");
     if peer_token().is_none() { println!("WARNING: ANA_PEER_TOKEN is unset; inbound connections are restricted to loopback."); }
     println!("RandomX testnet difficulty: starts at 8 bits; retargets every 10 completed blocks toward a 30-second target.");
     for peer in peers.iter() {
@@ -639,9 +751,23 @@ fn main() -> Result<()> {
 
     let active_connections = Arc::new(AtomicUsize::new(0));
     let sync_sessions: SyncSessions = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut connection_rate = ConnectionRateLimiter::default();
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
+                let source_ip = match stream.peer_addr() {
+                    Ok(address) => address.ip(),
+                    Err(error) => {
+                        eprintln!("Rejected connection with unavailable peer address: {error}");
+                        drop(stream);
+                        continue;
+                    }
+                };
+                if !connection_rate.allow(source_ip, Instant::now()) {
+                    eprintln!("Rejected connection: source rate limit reached");
+                    drop(stream);
+                    continue;
+                }
                 let current = active_connections.fetch_add(1, Ordering::SeqCst);
                 if current >= MAX_CONNECTIONS {
                     active_connections.fetch_sub(1, Ordering::SeqCst);
@@ -685,11 +811,105 @@ mod tests {
     }
 
     #[test]
-    fn remote_bind_requires_token_and_explicit_plaintext_opt_in() {
-        assert!(validate_bind_security("127.0.0.1:19001", false, false).is_ok());
-        assert!(validate_bind_security("0.0.0.0:19001", false, true).is_err());
-        assert!(validate_bind_security("0.0.0.0:19001", true, false).is_err());
-        assert!(validate_bind_security("0.0.0.0:19001", true, true).is_ok());
+    fn connection_rate_limiter_enforces_window_and_expires_old_attempts() {
+        let mut limiter = ConnectionRateLimiter::default();
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        let start = Instant::now();
+        for _ in 0..MAX_CONNECTIONS_PER_WINDOW {
+            assert!(limiter.allow(ip, start));
+        }
+        assert!(!limiter.allow(ip, start));
+        assert!(limiter.allow(ip, start + CONNECTION_RATE_WINDOW + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn connection_rate_limiter_caps_source_tracking() {
+        let mut limiter = ConnectionRateLimiter::default();
+        let start = Instant::now();
+        for value in 1..=MAX_RATE_LIMIT_ENTRIES {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(value as u32));
+            assert!(limiter.allow(ip, start));
+        }
+        let extra = IpAddr::V4(std::net::Ipv4Addr::from((MAX_RATE_LIMIT_ENTRIES + 1) as u32));
+        assert!(!limiter.allow(extra, start));
+        assert!(limiter.attempts.len() <= MAX_RATE_LIMIT_ENTRIES);
+    }
+
+    #[test]
+    fn mempool_persistence_replaces_existing_snapshot() {
+        let path = temp_file("mempool-replace");
+        fs::write(&path, b"stale snapshot").unwrap();
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        persist_mempool(&pool, &path).unwrap();
+        let restored: BTreeMap<String, Transaction> =
+            serde_json::from_slice(&read_bounded_file(&path, MAX_MEMPOOL_FILE_BYTES).unwrap()).unwrap();
+        assert!(restored.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn mempool_persistence_uses_unique_temp_files_and_leaves_no_temp_file() {
+        let path = temp_file("mempool-atomic");
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        persist_mempool(&pool, &path).unwrap();
+        assert!(path.exists());
+        let parent = path.parent().unwrap();
+        let prefix = format!("{}.tmp.", path.file_name().unwrap().to_string_lossy());
+        let leftovers = fs::read_dir(parent).unwrap().filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix));
+        assert!(!leftovers);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_file_reader_rejects_growth_past_limit() {
+        let path = temp_file("bounded-read");
+        fs::write(&path, b"12345").unwrap();
+        assert_eq!(read_bounded_file(&path, 5).unwrap(), b"12345");
+        assert!(read_bounded_file(&path, 4).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn seen_cache_is_bounded_and_reports_duplicates() {
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
+        assert!(remember_seen(&seen, "first".into()));
+        assert!(!remember_seen(&seen, "first".into()));
+        for index in 0..=MAX_SEEN_IDS {
+            let _ = remember_seen(&seen, format!("id-{index}"));
+        }
+        assert!(seen.lock().unwrap().ids.len() <= MAX_SEEN_IDS);
+    }
+
+    #[test]
+    fn seen_cache_evicts_oldest_inserted_id_first() {
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
+        assert!(remember_seen(&seen, "oldest".into()));
+        for index in 0..MAX_SEEN_IDS {
+            let _ = remember_seen(&seen, format!("new-{}", index));
+        }
+        let cache = seen.lock().unwrap();
+        assert!(!cache.ids.contains("oldest"));
+        assert!(cache.ids.contains(&format!("new-{}", MAX_SEEN_IDS - 1)));
+    }
+
+    #[test]
+    fn outbound_peer_transport_allows_loopback_only() {
+        assert!(validate_peer_security("127.0.0.1:18080").is_ok());
+        assert!(validate_peer_security("[::1]:18080").is_ok());
+        assert!(validate_peer_security("localhost:18080").is_ok());
+        assert!(validate_peer_security("0.0.0.0:18080").is_err());
+        assert!(validate_peer_security("[::]:18080").is_err());
+        assert!(validate_peer_security("192.0.2.1:18080").is_err());
+        assert!(resolve_loopback_peer("192.0.2.1:18080").is_err());
+    }
+
+    #[test]
+    fn plaintext_transport_allows_loopback_only() {
+        assert!(validate_bind_security("127.0.0.1:19001").is_ok());
+        assert!(validate_bind_security("[::1]:19001").is_ok());
+        assert!(validate_bind_security("0.0.0.0:19001").is_err());
+        assert!(validate_bind_security("[::]:19001").is_err());
     }
 
     #[test]
@@ -862,7 +1082,7 @@ mod network_security_tests {
         let address = listener.local_addr().unwrap();
         let chain: SharedChain = Arc::new(Mutex::new(ChainState::new()));
         let peers: Peers = Arc::new(Vec::new());
-        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let data_file = std::env::temp_dir().join(format!("ana-tcp-chain-{}.json", std::process::id()));
@@ -924,7 +1144,7 @@ mod network_security_tests {
                 stream,
                 b_chain,
                 Arc::new(Vec::new()),
-                Arc::new(Mutex::new(HashSet::new())),
+                Arc::new(Mutex::new(SeenCache::default())),
                 b_pool,
                 b_data,
                 b_active,
@@ -952,7 +1172,7 @@ mod network_security_tests {
                 stream,
                 a_chain,
                 peer_list,
-                Arc::new(Mutex::new(HashSet::new())),
+                Arc::new(Mutex::new(SeenCache::default())),
                 a_pool,
                 a_data,
                 a_active,
@@ -1007,7 +1227,7 @@ mod network_security_tests {
         let address = listener.local_addr().unwrap();
         let chain: SharedChain = Arc::new(Mutex::new(ChainState::new()));
         let peers: Peers = Arc::new(Vec::new());
-        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let data_file = std::env::temp_dir().join(format!("ana-tcp-status-{}.json", std::process::id()));

@@ -5,11 +5,26 @@
 //! cryptographic verification. Do not accept these transactions in consensus.
 
 use anyhow::{bail, Result};
-use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, edwards::{CompressedEdwardsY, EdwardsPoint}, scalar::Scalar, traits::IsIdentity};
+use curve25519_dalek::{
+    constants::{ED25519_BASEPOINT_POINT, RISTRETTO_BASEPOINT_POINT},
+    edwards::{CompressedEdwardsY, EdwardsPoint},
+    ristretto::{CompressedRistretto, RistrettoPoint},
+    scalar::Scalar,
+    traits::IsIdentity,
+};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    fs,
+    io::{Read, Write},
+    path::Path,
+};
+
+pub const MAX_PRIVACY_KEY_IMAGES: usize = 500_000;
+const PRIVACY_KEY_IMAGE_STORE_VERSION: u8 = 1;
+const MAX_PRIVACY_KEY_IMAGE_STORE_BYTES: u64 = 32 * 1024 * 1024;
 
 pub const PRIVACY_TX_VERSION: u8 = 1;
 /// Initial ring size chosen for the experimental v1 wire format.
@@ -91,7 +106,7 @@ impl PrivacyTransactionV1 {
             if !key_images.insert(input.key_image) {
                 bail!("privacy input has a duplicate key image");
             }
-            validate_compressed_point(
+            validate_compressed_ristretto(
                 &input.pseudo_output_commitment,
                 "pseudo-output commitment",
             )?;
@@ -101,23 +116,175 @@ impl PrivacyTransactionV1 {
                 bail!("privacy input CLSAG data is missing or too large");
             }
 
-            let mut ring_members = HashSet::with_capacity(input.ring.len());
+            let mut previous_index = None;
             for member in &input.ring {
-                if !ring_members.insert(member.global_index) {
-                    bail!("privacy input ring contains a duplicate output");
+                if let Some(previous) = previous_index {
+                    if member.global_index <= previous {
+                        bail!("privacy input ring members must be strictly increasing");
+                    }
                 }
+                previous_index = Some(member.global_index);
             }
         }
 
         for output in &self.outputs {
             validate_compressed_point(&output.stealth.one_time_key, "one-time output key")?;
             validate_compressed_point(&output.stealth.tx_public_key, "transaction public key")?;
-            validate_compressed_point(&output.commitment, "output commitment")?;
+            validate_compressed_ristretto(&output.commitment, "output commitment")?;
         }
         Ok(())
     }
 }
 
+
+/// Network identifiers are deliberately restricted so address encodings
+/// cannot be made ambiguous by separators, whitespace, or Unicode lookalikes.
+fn valid_network_id(network: &str) -> bool {
+    !network.is_empty()
+        && network.len() <= 64
+        && network
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+#[derive(Serialize, Deserialize)]
+struct PrivacyKeyImageStoreV1 {
+    version: u8,
+    network: String,
+    key_images: Vec<[u8; 32]>,
+}
+
+/// Experimental local key-image registry for unit tests only.
+///
+/// This registry is NOT consensus state. Its snapshot persistence is local
+/// test storage, not rollback-resistant or consensus-grade state. It must not
+/// be used to authorize a spend or integrated into block validation. The
+/// mutation helper is compiled only for unit tests because no audited
+/// cryptographic verifier currently produces a verified-transaction type.
+#[derive(Clone, Debug, Default)]
+pub struct PrivacyKeyImageRegistryV1 {
+    spent: HashSet<[u8; 32]>,
+    network: Option<String>,
+}
+
+impl PrivacyKeyImageRegistryV1 {
+    /// Check a transaction's key images without mutating the registry.
+    pub fn check_unspent(
+        &self,
+        tx: &PrivacyTransactionV1,
+        expected_network: &str,
+    ) -> Result<()> {
+        tx.validate_structure(expected_network)?;
+        if self.network.as_deref().is_some_and(|network| network != expected_network) {
+            bail!("privacy key-image registry belongs to another network");
+        }
+        for input in &tx.inputs {
+            if self.spent.contains(&input.key_image) {
+                bail!("privacy key image has already been spent");
+            }
+        }
+        Ok(())
+    }
+
+    /// Test helper only: production code cannot record unverified transactions.
+    ///
+    /// This deliberately accepts the structural test fixture; it is not a
+    /// cryptographic verification boundary and must remain test-only until a
+    /// verifier-backed transaction type is implemented.
+    #[cfg(test)]
+    pub fn record_after_verification(
+        &mut self,
+        tx: &PrivacyTransactionV1,
+        expected_network: &str,
+    ) -> Result<()> {
+        self.check_unspent(tx, expected_network)?;
+        if self.spent.len().saturating_add(tx.inputs.len()) > MAX_PRIVACY_KEY_IMAGES {
+            bail!("privacy key-image registry capacity exceeded");
+        }
+        self.spent.extend(tx.inputs.iter().map(|input| input.key_image));
+        self.network = Some(expected_network.to_owned());
+        Ok(())
+    }
+
+    /// Persist a network-scoped snapshot using an atomic temporary-file rename.
+    /// This is experimental local storage, not consensus-grade database state:
+    /// callers must serialize writers and protect the containing directory.
+    pub fn save(&self, path: &Path, network: &str) -> Result<()> {
+        if !valid_network_id(network) {
+            bail!("invalid privacy key-image store network");
+        }
+        if self.network.as_deref().is_some_and(|bound| bound != network) {
+            bail!("cannot save privacy key-image registry under another network");
+        }
+        if self.spent.len() > MAX_PRIVACY_KEY_IMAGES {
+            bail!("privacy key-image registry capacity exceeded");
+        }
+        let mut key_images: Vec<[u8; 32]> = self.spent.iter().copied().collect();
+        key_images.sort_unstable();
+        let snapshot = PrivacyKeyImageStoreV1 {
+            version: PRIVACY_KEY_IMAGE_STORE_VERSION,
+            network: network.to_owned(),
+            key_images,
+        };
+        let bytes = serde_json::to_vec(&snapshot)?;
+        if bytes.len() as u64 > MAX_PRIVACY_KEY_IMAGE_STORE_BYTES {
+            bail!("privacy key-image store exceeds the size limit");
+        }
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    }
+
+    /// Load and strictly validate a network-scoped key-image snapshot.
+    pub fn load(path: &Path, expected_network: &str) -> Result<Self> {
+        if !valid_network_id(expected_network) {
+            bail!("invalid expected privacy key-image store network");
+        }
+        let file = fs::File::open(path)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_PRIVACY_KEY_IMAGE_STORE_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_PRIVACY_KEY_IMAGE_STORE_BYTES {
+            bail!("privacy key-image store exceeds the size limit");
+        }
+        let snapshot: PrivacyKeyImageStoreV1 = serde_json::from_slice(&bytes)?;
+        if snapshot.version != PRIVACY_KEY_IMAGE_STORE_VERSION
+            || snapshot.network != expected_network
+            || snapshot.key_images.len() > MAX_PRIVACY_KEY_IMAGES
+        {
+            bail!("unsupported, wrong-network, or oversized privacy key-image store");
+        }
+        let mut spent = HashSet::with_capacity(snapshot.key_images.len());
+        let mut previous: Option<[u8; 32]> = None;
+        for key_image in snapshot.key_images {
+            validate_compressed_point(&key_image, "persisted key image")?;
+            if previous.is_some_and(|value| key_image <= value) {
+                bail!("privacy key-image store is not strictly sorted or has duplicates");
+            }
+            previous = Some(key_image);
+            spent.insert(key_image);
+        }
+        Ok(Self {
+            spent,
+            network: Some(expected_network.to_owned()),
+        })
+    }
+
+    pub fn contains(&self, key_image: &[u8; 32]) -> bool {
+        self.spent.contains(key_image)
+    }
+
+    pub fn len(&self) -> usize {
+        self.spent.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spent.is_empty()
+    }
+}
 
 /// Public two-key address. The spend key controls outputs; the view key scans them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +296,10 @@ pub struct PrivacyAddressV1 {
 
 impl PrivacyAddressV1 {
     pub fn validate(&self, expected_network: &str) -> Result<()> {
-        if self.network != expected_network || self.network.contains(':') {
+        if !valid_network_id(&self.network)
+            || !valid_network_id(expected_network)
+            || self.network != expected_network
+        {
             bail!("privacy address belongs to another network or has invalid network text");
         }
         validate_compressed_point(&self.spend_public, "address spend public key")?;
@@ -270,6 +440,22 @@ fn decompress_point(encoded: &[u8; 32]) -> Result<EdwardsPoint> {
     validate_compressed_point(encoded, "wallet public point")
 }
 
+/// Decode a canonical, non-identity Ristretto point used for Pedersen commitments.
+/// Ristretto encodings are not interchangeable with Edwards compressed points.
+fn validate_compressed_ristretto(encoded: &[u8; 32], field: &str) -> Result<RistrettoPoint> {
+    let compressed = CompressedRistretto(*encoded);
+    let point = compressed
+        .decompress()
+        .ok_or_else(|| anyhow::anyhow!("invalid Ristretto point encoding for {field}"))?;
+    if point.compress().to_bytes() != *encoded {
+        bail!("non-canonical Ristretto point encoding for {field}");
+    }
+    if point.is_identity() {
+        bail!("identity Ristretto point for {field}");
+    }
+    Ok(point)
+}
+
 fn output_derivation(shared: &EdwardsPoint, output_index: u64) -> Scalar {
     let mut hasher = Sha512::new();
     hasher.update(b"ANA-PRIVACY-OUTPUT-DERIVATION-v1");
@@ -314,6 +500,19 @@ mod tests {
     }
 
     #[test]
+    fn privacy_address_rejects_ambiguous_or_noncanonical_network_ids() {
+        let wallet = PrivacyWalletKeysV1::generate("ANA-TESTNET-1").unwrap();
+        let mut address = wallet.address().clone();
+        for invalid in ["", "ana-testnet-1", "ANA:TESTNET", "ANA TESTNET", "ANA_1", "ＡＮＡ"] {
+            address.network = invalid.to_owned();
+            assert!(address.validate("ANA-TESTNET-1").is_err(), "accepted {invalid:?}");
+        }
+        address.network = "A".repeat(65);
+        assert!(address.validate("ANA-TESTNET-1").is_err());
+        assert!(wallet.address().validate("ana-testnet-1").is_err());
+    }
+
+    #[test]
     fn privacy_address_round_trips_and_rejects_other_network() {
         let wallet = PrivacyWalletKeysV1::generate("ANA-TESTNET-1").unwrap();
         let encoded = wallet.address().encode();
@@ -324,6 +523,7 @@ mod tests {
 
     fn structurally_valid_transaction() -> PrivacyTransactionV1 {
         let valid_point = ED25519_BASEPOINT_POINT.compress().to_bytes();
+        let valid_commitment = RISTRETTO_BASEPOINT_POINT.compress().to_bytes();
         PrivacyTransactionV1 {
             version: PRIVACY_TX_VERSION,
             network: "ANA-TESTNET-1".into(),
@@ -332,12 +532,12 @@ mod tests {
                     .map(|global_index| OutputReference { global_index })
                     .collect(),
                 key_image: valid_point,
-                pseudo_output_commitment: valid_point,
+                pseudo_output_commitment: valid_commitment,
                 clsag_signature: vec![3; 64],
             }],
             outputs: vec![PrivacyOutputV1 {
                 stealth: StealthOutputV1 { one_time_key: valid_point, tx_public_key: valid_point, view_tag: 7 },
-                commitment: valid_point,
+                commitment: valid_commitment,
                 encrypted_amount: [6; 24],
             }],
             fee: 100,
@@ -373,6 +573,137 @@ mod tests {
     }
 
     #[test]
+    fn privacy_v1_rejects_unsorted_ring_members() {
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].ring.swap(0, 1);
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn privacy_v1_rejects_duplicate_ring_members_even_when_adjacent() {
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].ring[1].global_index = tx.inputs[0].ring[0].global_index;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_persists_and_is_network_scoped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("privacy-key-images.json");
+        let tx = structurally_valid_transaction();
+        let key_image = tx.inputs[0].key_image;
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        registry.record_after_verification(&tx, "ANA-TESTNET-1").unwrap();
+        registry.save(&path, "ANA-TESTNET-1").unwrap();
+
+        let loaded = PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").unwrap();
+        assert!(loaded.contains(&key_image));
+        assert_eq!(loaded.len(), 1);
+        assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-MAINNET").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_save_replaces_an_existing_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replace-store.json");
+        let first = structurally_valid_transaction();
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        registry.record_after_verification(&first, "ANA-TESTNET-1").unwrap();
+        registry.save(&path, "ANA-TESTNET-1").unwrap();
+
+        let mut second = structurally_valid_transaction();
+        second.inputs[0].key_image =
+            (ED25519_BASEPOINT_POINT * Scalar::from(9u64)).compress().to_bytes();
+        registry.record_after_verification(&second, "ANA-TESTNET-1").unwrap();
+        registry.save(&path, "ANA-TESTNET-1").unwrap();
+
+        let loaded = PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.contains(&first.inputs[0].key_image));
+        assert!(loaded.contains(&second.inputs[0].key_image));
+    }
+
+    #[test]
+    fn key_image_registry_rejects_truncated_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("truncated-store.json");
+        std::fs::write(&path, br#"{"version":1,"network":"ANA-TESTNET-1","key_images":["#)
+            .unwrap();
+        assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_cannot_be_relabelled_to_another_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("network-bound-store.json");
+        let tx = structurally_valid_transaction();
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        registry.record_after_verification(&tx, "ANA-TESTNET-1").unwrap();
+        assert!(registry.save(&path, "ANA-MAINNET").is_err());
+        assert!(registry.save(&path, "ANA-TESTNET-1").is_ok());
+        assert!(registry
+            .check_unspent(&tx, "ANA-MAINNET")
+            .is_err());
+    }
+
+    #[test]
+    fn key_image_registry_rejects_noncanonical_persisted_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("bad-store.json");
+        let snapshot = PrivacyKeyImageStoreV1 {
+            version: PRIVACY_KEY_IMAGE_STORE_VERSION,
+            network: "ANA-TESTNET-1".into(),
+            key_images: vec![
+                ED25519_BASEPOINT_POINT.compress().to_bytes(),
+                ED25519_BASEPOINT_POINT.compress().to_bytes(),
+            ],
+        };
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_rejects_replay_across_transactions() {
+        let tx = structurally_valid_transaction();
+        let key_image = tx.inputs[0].key_image;
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+
+        assert!(registry.check_unspent(&tx, "ANA-TESTNET-1").is_ok());
+        registry.record_after_verification(&tx, "ANA-TESTNET-1").unwrap();
+        assert!(registry.contains(&key_image));
+        assert_eq!(registry.len(), 1);
+        assert!(registry.check_unspent(&tx, "ANA-TESTNET-1").is_err());
+        assert!(registry
+            .record_after_verification(&tx, "ANA-TESTNET-1")
+            .is_err());
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn key_image_registry_recording_is_atomic_on_conflict() {
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        let existing = structurally_valid_transaction();
+        registry
+            .record_after_verification(&existing, "ANA-TESTNET-1")
+            .unwrap();
+
+        let mut candidate = structurally_valid_transaction();
+        candidate.inputs[0].key_image =
+            (ED25519_BASEPOINT_POINT * Scalar::from(2u64)).compress().to_bytes();
+        let mut conflicting = candidate.inputs[0].clone();
+        conflicting.key_image = existing.inputs[0].key_image;
+        conflicting.ring.iter_mut().for_each(|member| member.global_index += 100);
+        candidate.inputs.push(conflicting);
+
+        let new_key_image = candidate.inputs[0].key_image;
+        assert!(registry
+            .record_after_verification(&candidate, "ANA-TESTNET-1")
+            .is_err());
+        assert!(!registry.contains(&new_key_image));
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
     fn privacy_v1_rejects_duplicate_key_images() {
         let mut tx = structurally_valid_transaction();
         let mut second = tx.inputs[0].clone();
@@ -388,6 +719,34 @@ mod tests {
         assert!(validate_compressed_point(&[0xff; 32], "test").is_err());
         let basepoint = ED25519_BASEPOINT_POINT.compress().to_bytes();
         assert!(validate_compressed_point(&basepoint, "test").is_ok());
+    }
+
+    #[test]
+    fn privacy_v1_uses_ristretto_for_pedersen_commitments() {
+        let mut tx = structurally_valid_transaction();
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_ok());
+
+        // Edwards encodings must not be accepted in Ristretto commitment fields.
+        let edwards = ED25519_BASEPOINT_POINT.compress().to_bytes();
+        tx.inputs[0].pseudo_output_commitment = edwards;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].commitment = edwards;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
+    fn privacy_v1_rejects_identity_ristretto_commitments() {
+        let identity = RistrettoPoint::default().compress().to_bytes();
+
+        let mut tx = structurally_valid_transaction();
+        tx.inputs[0].pseudo_output_commitment = identity;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
+
+        let mut tx = structurally_valid_transaction();
+        tx.outputs[0].commitment = identity;
+        assert!(tx.validate_structure("ANA-TESTNET-1").is_err());
     }
 
     #[test]

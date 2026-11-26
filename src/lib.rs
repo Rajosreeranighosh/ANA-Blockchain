@@ -211,6 +211,35 @@ impl Ledger {
         *self.nonces.get(a).unwrap_or(&0)
     }
 
+    /// Experimental deterministic commitment to transparent ledger state.
+    ///
+    /// This is shadow-only: it is not included in block headers and MUST NOT
+    /// be treated as a consensus commitment until canonical encoding and
+    /// activation rules are separately specified and reviewed.
+    pub fn shadow_state_root(&self) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ANA-TRANSPARENT-STATE-SHADOW-v1");
+        hasher.update((NETWORK.len() as u64).to_le_bytes());
+        hasher.update(NETWORK.as_bytes());
+        hasher.update(self.minted.to_le_bytes());
+
+        hasher.update((self.balances.len() as u64).to_le_bytes());
+        for (address, balance) in &self.balances {
+            hasher.update((address.len() as u64).to_le_bytes());
+            hasher.update(address.as_bytes());
+            hasher.update(balance.to_le_bytes());
+        }
+
+        hasher.update((self.nonces.len() as u64).to_le_bytes());
+        for (address, nonce) in &self.nonces {
+            hasher.update((address.len() as u64).to_le_bytes());
+            hasher.update(address.as_bytes());
+            hasher.update(nonce.to_le_bytes());
+        }
+
+        Ok(hex::encode(hasher.finalize()))
+    }
+
     fn credit(&mut self, a: &str, n: u64) -> Result<()> {
         let v = self.balance(a).checked_add(n).context("balance overflow")?;
         self.balances.insert(a.into(), v);
@@ -271,6 +300,161 @@ impl Ledger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadow_state_root_is_deterministic_and_domain_separated() {
+        let ledger = Ledger::default();
+        assert_eq!(ledger.shadow_state_root().unwrap(), ledger.shadow_state_root().unwrap());
+        assert_eq!(ledger.shadow_state_root().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn shadow_state_root_changes_for_balance_nonce_and_supply_mutations() {
+        let baseline = Ledger::default().shadow_state_root().unwrap();
+        let mut changed_balance = Ledger::default();
+        changed_balance.balances.insert("ana1example".into(), 1);
+        assert_ne!(baseline, changed_balance.shadow_state_root().unwrap());
+
+        let mut changed_nonce = Ledger::default();
+        changed_nonce.nonces.insert("ana1example".into(), 1);
+        assert_ne!(baseline, changed_nonce.shadow_state_root().unwrap());
+
+        let mut changed_supply = Ledger::default();
+        changed_supply.minted = 1;
+        assert_ne!(baseline, changed_supply.shadow_state_root().unwrap());
+    }
+
+    #[test]
+    fn chain_append_updates_shadow_root_and_replay_reproduces_it() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut chain = ChainState::new();
+        let initial_root = chain.shadow_state_root().unwrap();
+
+        let block = chain.mine_next(address(&miner.verifying_key())).unwrap();
+        chain.append(block).unwrap();
+
+        let appended_root = chain.shadow_state_root().unwrap();
+        assert_ne!(initial_root, appended_root);
+        assert_eq!(chain.ledger.minted, BLOCK_REWARD);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chain.json");
+        chain.save(&path).unwrap();
+        let replayed = ChainState::load(&path).unwrap();
+
+        assert_eq!(replayed.blocks.len(), chain.blocks.len());
+        assert_eq!(replayed.ledger.minted, chain.ledger.minted);
+        assert_eq!(replayed.ledger.balances, chain.ledger.balances);
+        assert_eq!(replayed.ledger.nonces, chain.ledger.nonces);
+        assert_eq!(replayed.shadow_state_root().unwrap(), appended_root);
+    }
+
+    #[test]
+    fn chain_reorganization_replays_ledger_and_shadow_root_atomically() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut candidate = ChainState::new();
+        let block = candidate.mine_next(address(&miner.verifying_key())).unwrap();
+        candidate.append(block).unwrap();
+
+        let expected_root = candidate.shadow_state_root().unwrap();
+        let expected_blocks = candidate.blocks.clone();
+        let mut active = ChainState::new();
+
+        assert!(active.replace_if_more_work(expected_blocks.clone()).unwrap());
+        assert_eq!(active.blocks.len(), candidate.blocks.len());
+        assert_eq!(active.ledger.minted, candidate.ledger.minted);
+        assert_eq!(active.ledger.balances, candidate.ledger.balances);
+        assert_eq!(active.ledger.nonces, candidate.ledger.nonces);
+        assert_eq!(active.shadow_state_root().unwrap(), expected_root);
+
+        // The same equal-work chain must not trigger a second replacement.
+        assert!(!active.replace_if_more_work(expected_blocks).unwrap());
+        assert_eq!(active.shadow_state_root().unwrap(), expected_root);
+    }
+
+    #[test]
+    fn invalid_reorganization_candidate_leaves_active_chain_and_ledger_unchanged() {
+        let active_miner = SigningKey::generate(&mut OsRng);
+        let candidate_miner = SigningKey::generate(&mut OsRng);
+
+        let mut active = ChainState::new();
+        let active_block = active.mine_next(address(&active_miner.verifying_key())).unwrap();
+        active.append(active_block).unwrap();
+        let active_blocks = active.blocks.clone();
+        let active_root = active.shadow_state_root().unwrap();
+        let active_work = active.cumulative_work().unwrap();
+        let active_minted = active.ledger.minted;
+        let active_balances = active.ledger.balances.clone();
+        let active_nonces = active.ledger.nonces.clone();
+
+        let mut candidate = ChainState::new();
+        let mut invalid_block = candidate
+            .mine_next(address(&candidate_miner.verifying_key()))
+            .unwrap();
+        invalid_block.hash.push('0');
+        let mut invalid_blocks = candidate.blocks.clone();
+        invalid_blocks.push(invalid_block);
+
+        assert!(active.replace_if_more_work(invalid_blocks).is_err());
+        assert_eq!(active.blocks.len(), active_blocks.len());
+        assert_eq!(active.blocks[0].hash, active_blocks[0].hash);
+        assert_eq!(active.blocks[1].hash, active_blocks[1].hash);
+        assert_eq!(active.ledger.minted, active_minted);
+        assert_eq!(active.ledger.balances, active_balances);
+        assert_eq!(active.ledger.nonces, active_nonces);
+        assert_eq!(active.cumulative_work().unwrap(), active_work);
+        assert_eq!(active.shadow_state_root().unwrap(), active_root);
+    }
+
+    #[test]
+    fn lower_work_reorganization_candidate_does_not_replace_active_chain() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut active = ChainState::new();
+        let block = active.mine_next(address(&miner.verifying_key())).unwrap();
+        active.append(block).unwrap();
+
+        let active_blocks = active.blocks.clone();
+        let active_root = active.shadow_state_root().unwrap();
+        let active_work = active.cumulative_work().unwrap();
+        let active_minted = active.ledger.minted;
+
+        let lower_work_candidate = vec![genesis_block()];
+        assert!(!active.replace_if_more_work(lower_work_candidate).unwrap());
+        assert_eq!(active.blocks.len(), active_blocks.len());
+        assert_eq!(active.tip().hash, active_blocks.last().unwrap().hash);
+        assert_eq!(active.ledger.minted, active_minted);
+        assert_eq!(active.cumulative_work().unwrap(), active_work);
+        assert_eq!(active.shadow_state_root().unwrap(), active_root);
+    }
+
+    #[test]
+    fn invalid_chain_load_is_rejected_without_trusting_stored_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tampered-chain.json");
+        let mut state = ChainState::new();
+        state.ledger.minted = BLOCK_REWARD;
+        state.ledger.balances.insert("ana1tampered".into(), BLOCK_REWARD);
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        assert!(ChainState::load(&path).is_err());
+    }
+
+    #[test]
+    fn shadow_state_root_is_independent_of_insertion_order() {
+        let mut first = Ledger::default();
+        first.balances.insert("ana1b".into(), 2);
+        first.balances.insert("ana1a".into(), 1);
+        first.nonces.insert("ana1b".into(), 4);
+        first.nonces.insert("ana1a".into(), 3);
+
+        let mut second = Ledger::default();
+        second.balances.insert("ana1a".into(), 1);
+        second.balances.insert("ana1b".into(), 2);
+        second.nonces.insert("ana1a".into(), 3);
+        second.nonces.insert("ana1b".into(), 4);
+
+        assert_eq!(first.shadow_state_root().unwrap(), second.shadow_state_root().unwrap());
+    }
 
     #[test]
     fn median_time_past_uses_the_upper_median_of_recent_blocks() {
@@ -363,6 +547,57 @@ mod tests {
     }
 
     #[test]
+    fn block_replay_accepts_sequential_nonces_and_accounts_for_fees_once() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let miner = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let receiver_address = address(&receiver.verifying_key());
+        let miner_address = address(&miner.verifying_key());
+        let mut ledger = Ledger::default();
+        ledger.balances.insert(sender_address.clone(), 10 * COIN);
+
+        let first = sign(&sender, receiver_address.clone(), COIN, COIN / 100, 0).unwrap();
+        let second = sign(&sender, receiver_address.clone(), 2 * COIN, COIN / 50, 1).unwrap();
+        let mut block = empty_block(&miner, 1);
+        block.transactions = vec![first, second];
+
+        ledger.apply_block(&block).unwrap();
+
+        assert_eq!(ledger.nonce(&sender_address), 2);
+        assert_eq!(ledger.balance(&sender_address), 7 * COIN - 3 * COIN / 100);
+        assert_eq!(ledger.balance(&receiver_address), 3 * COIN);
+        assert_eq!(ledger.balance(&miner_address), BLOCK_REWARD + 3 * COIN / 100);
+        assert_eq!(ledger.minted, BLOCK_REWARD);
+    }
+
+    #[test]
+    fn block_replay_rejects_duplicate_transaction_nonce_atomically() {
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let miner = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let mut ledger = Ledger::default();
+        ledger.balances.insert(sender_address.clone(), 5 * COIN);
+        let transaction = sign(
+            &sender,
+            address(&receiver.verifying_key()),
+            COIN,
+            COIN / 100,
+            0,
+        )
+        .unwrap();
+        let mut block = empty_block(&miner, 1);
+        block.transactions = vec![transaction.clone(), transaction];
+
+        let before = ledger.clone();
+        assert!(ledger.apply_block(&block).is_err());
+        assert_eq!(ledger.balances, before.balances);
+        assert_eq!(ledger.nonces, before.nonces);
+        assert_eq!(ledger.minted, before.minted);
+    }
+
+    #[test]
     fn first_block_mints_exactly_50_ana_to_miner() {
         let miner = SigningKey::generate(&mut OsRng);
         let miner_address = address(&miner.verifying_key());
@@ -426,6 +661,19 @@ mod tests {
         ledger.apply_block(&empty_block(&miner, 2)).unwrap();
         assert_eq!(ledger.minted, MAX_SUPPLY);
         assert_eq!(ledger.balance(&miner_address), 1);
+    }
+
+    #[test]
+    fn ledger_rejects_preexisting_supply_above_cap_atomically() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut ledger = Ledger::default();
+        ledger.minted = MAX_SUPPLY + 1;
+        let before = ledger.clone();
+
+        assert!(ledger.apply_block(&empty_block(&miner, 1)).is_err());
+        assert_eq!(ledger.minted, before.minted);
+        assert_eq!(ledger.balances, before.balances);
+        assert_eq!(ledger.nonces, before.nonces);
     }
 
     #[test]
@@ -622,6 +870,12 @@ impl ChainState {
 
     pub fn tip(&self) -> &Block {
         self.blocks.last().expect("chain always contains genesis")
+    }
+
+    /// Return the current transparent ledger's experimental shadow commitment.
+    /// This value is diagnostic only and does not affect block validity.
+    pub fn shadow_state_root(&self) -> Result<String> {
+        self.ledger.shadow_state_root()
     }
 
     /// Compare a fully validated candidate chain using cumulative proof-of-work.

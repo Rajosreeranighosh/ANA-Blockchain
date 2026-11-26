@@ -696,11 +696,23 @@ mod tests {
     use rand::rngs::OsRng;
 
     fn temp_file(label: &str) -> PathBuf {
+        // Thread names contain ':' in Rust's test harness and are invalid
+        // filename characters on Windows. Labels are unique within this test module.
         std::env::temp_dir().join(format!(
-            "ana-{label}-{}-{}.json",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "ana-{label}-{}.json",
+            std::process::id()
         ))
+    }
+
+    #[test]
+    fn seen_cache_is_bounded_and_reports_duplicates() {
+        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        assert!(remember_seen(&seen, "first".into()));
+        assert!(!remember_seen(&seen, "first".into()));
+        for index in 0..=MAX_SEEN_IDS {
+            let _ = remember_seen(&seen, format!("id-{index}"));
+        }
+        assert!(seen.lock().unwrap().len() <= MAX_SEEN_IDS);
     }
 
     #[test]

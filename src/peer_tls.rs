@@ -228,6 +228,7 @@ mod tests {
             "wrong-node" => include_bytes!("../tests/fixtures/peer-wrong-node.pem").as_slice(),
             "malformed" => include_bytes!("../tests/fixtures/peer-malformed-uri.pem").as_slice(),
             "missing-san" => include_bytes!("../tests/fixtures/peer-missing-san.pem").as_slice(),
+            "duplicate-san" => include_bytes!("../tests/fixtures/peer-duplicate-san.pem").as_slice(),
             _ => panic!("unknown certificate fixture"),
         };
         rustls_pemfile::certs(&mut BufReader::new(pem))
@@ -272,6 +273,11 @@ mod tests {
     fn malformed_and_missing_uri_san_are_rejected() {
         assert!(verify_peer_identity(&fixture_certificate("malformed"), "testnet", None).is_err());
         assert!(verify_peer_identity(&fixture_certificate("missing-san"), "testnet", None).is_err());
+    }
+
+    #[test]
+    fn duplicate_san_extension_is_rejected() {
+        assert!(verify_peer_identity(&fixture_certificate("duplicate-san"), "testnet", None).is_err());
     }
 
     #[test]

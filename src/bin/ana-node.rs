@@ -715,6 +715,15 @@ mod tests {
     }
 
     #[test]
+    fn bounded_file_reader_rejects_growth_past_limit() {
+        let path = temp_file("bounded-read");
+        fs::write(&path, b"12345").unwrap();
+        assert_eq!(read_bounded_file(&path, 5).unwrap(), b"12345");
+        assert!(read_bounded_file(&path, 4).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn seen_cache_is_bounded_and_reports_duplicates() {
         let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
         assert!(remember_seen(&seen, "first".into()));

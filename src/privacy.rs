@@ -601,6 +601,36 @@ mod tests {
     }
 
     #[test]
+    fn key_image_registry_save_replaces_an_existing_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("replace-store.json");
+        let first = structurally_valid_transaction();
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        registry.record_after_verification(&first, "ANA-TESTNET-1").unwrap();
+        registry.save(&path, "ANA-TESTNET-1").unwrap();
+
+        let mut second = structurally_valid_transaction();
+        second.inputs[0].key_image =
+            (ED25519_BASEPOINT_POINT * Scalar::from(9u64)).compress().to_bytes();
+        registry.record_after_verification(&second, "ANA-TESTNET-1").unwrap();
+        registry.save(&path, "ANA-TESTNET-1").unwrap();
+
+        let loaded = PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.contains(&first.inputs[0].key_image));
+        assert!(loaded.contains(&second.inputs[0].key_image));
+    }
+
+    #[test]
+    fn key_image_registry_rejects_truncated_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("truncated-store.json");
+        std::fs::write(&path, br#"{"version":1,"network":"ANA-TESTNET-1","key_images":["#)
+            .unwrap();
+        assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-TESTNET-1").is_err());
+    }
+
+    #[test]
     fn key_image_registry_cannot_be_relabelled_to_another_network() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("network-bound-store.json");

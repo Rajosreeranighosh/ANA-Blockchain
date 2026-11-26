@@ -164,6 +164,7 @@ struct PrivacyKeyImageStoreV1 {
 #[derive(Clone, Debug, Default)]
 pub struct PrivacyKeyImageRegistryV1 {
     spent: HashSet<[u8; 32]>,
+    network: Option<String>,
 }
 
 impl PrivacyKeyImageRegistryV1 {
@@ -174,6 +175,9 @@ impl PrivacyKeyImageRegistryV1 {
         expected_network: &str,
     ) -> Result<()> {
         tx.validate_structure(expected_network)?;
+        if self.network.as_deref().is_some_and(|network| network != expected_network) {
+            bail!("privacy key-image registry belongs to another network");
+        }
         for input in &tx.inputs {
             if self.spent.contains(&input.key_image) {
                 bail!("privacy key image has already been spent");
@@ -196,6 +200,7 @@ impl PrivacyKeyImageRegistryV1 {
             bail!("privacy key-image registry capacity exceeded");
         }
         self.spent.extend(tx.inputs.iter().map(|input| input.key_image));
+        self.network = Some(expected_network.to_owned());
         Ok(())
     }
 
@@ -205,6 +210,9 @@ impl PrivacyKeyImageRegistryV1 {
     pub fn save(&self, path: &Path, network: &str) -> Result<()> {
         if !valid_network_id(network) {
             bail!("invalid privacy key-image store network");
+        }
+        if self.network.as_deref().is_some_and(|bound| bound != network) {
+            bail!("cannot save privacy key-image registry under another network");
         }
         if self.spent.len() > MAX_PRIVACY_KEY_IMAGES {
             bail!("privacy key-image registry capacity exceeded");
@@ -257,7 +265,10 @@ impl PrivacyKeyImageRegistryV1 {
             previous = Some(key_image);
             spent.insert(key_image);
         }
-        Ok(Self { spent })
+        Ok(Self {
+            spent,
+            network: Some(expected_network.to_owned()),
+        })
     }
 
     pub fn contains(&self, key_image: &[u8; 32]) -> bool {
@@ -587,6 +598,20 @@ mod tests {
         assert!(loaded.contains(&key_image));
         assert_eq!(loaded.len(), 1);
         assert!(PrivacyKeyImageRegistryV1::load(&path, "ANA-MAINNET").is_err());
+    }
+
+    #[test]
+    fn key_image_registry_cannot_be_relabelled_to_another_network() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("network-bound-store.json");
+        let tx = structurally_valid_transaction();
+        let mut registry = PrivacyKeyImageRegistryV1::default();
+        registry.record_after_verification(&tx, "ANA-TESTNET-1").unwrap();
+        assert!(registry.save(&path, "ANA-MAINNET").is_err());
+        assert!(registry.save(&path, "ANA-TESTNET-1").is_ok());
+        assert!(registry
+            .check_unspent(&tx, "ANA-MAINNET")
+            .is_err());
     }
 
     #[test]

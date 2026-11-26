@@ -16,8 +16,8 @@ jobs:
         os: [ubuntu-latest, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master (stable toolchain action)
       - name: Install native build tools and GUI libraries (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -25,7 +25,7 @@ jobs:
           sudo apt-get install -y build-essential cmake pkg-config libgl1-mesa-dev libx11-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev
       - name: Configure MSVC developer environment (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
       - name: Format Rust sources
         run: cargo fmt --all
       - name: Verify Rust formatting

@@ -232,16 +232,26 @@ fn persist_mempool(pool: &Mempool, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read a file without trusting a prior metadata() size check. The extra byte
+/// detects oversized files even if they grow while being read.
+fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        bail!("file exceeds the configured size limit");
+    }
+    Ok(bytes)
+}
+
 /// Load only correctly keyed, correctly signed, currently executable transactions.
 fn load_mempool(path: &Path, chain: &ChainState) -> Result<BTreeMap<String, Transaction>> {
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_MEMPOOL_FILE_BYTES {
-        bail!("mempool file exceeds the configured size limit");
-    }
-    let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&fs::read(path)?)?;
+    let bytes = read_bounded_file(path, MAX_MEMPOOL_FILE_BYTES)
+        .context("could not safely read mempool file")?;
+    let stored: BTreeMap<String, Transaction> = serde_json::from_slice(&bytes)?;
     if stored.len() > MAX_MEMPOOL_TRANSACTIONS {
         bail!("mempool file exceeds the configured transaction limit");
     }

@@ -936,7 +936,7 @@ mod network_security_tests {
         let address = listener.local_addr().unwrap();
         let chain: SharedChain = Arc::new(Mutex::new(ChainState::new()));
         let peers: Peers = Arc::new(Vec::new());
-        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let data_file = std::env::temp_dir().join(format!("ana-tcp-chain-{}.json", std::process::id()));
@@ -998,7 +998,7 @@ mod network_security_tests {
                 stream,
                 b_chain,
                 Arc::new(Vec::new()),
-                Arc::new(Mutex::new(HashSet::new())),
+                Arc::new(Mutex::new(SeenCache::default())),
                 b_pool,
                 b_data,
                 b_active,
@@ -1026,7 +1026,7 @@ mod network_security_tests {
                 stream,
                 a_chain,
                 peer_list,
-                Arc::new(Mutex::new(HashSet::new())),
+                Arc::new(Mutex::new(SeenCache::default())),
                 a_pool,
                 a_data,
                 a_active,
@@ -1081,7 +1081,7 @@ mod network_security_tests {
         let address = listener.local_addr().unwrap();
         let chain: SharedChain = Arc::new(Mutex::new(ChainState::new()));
         let peers: Peers = Arc::new(Vec::new());
-        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let data_file = std::env::temp_dir().join(format!("ana-tcp-status-{}.json", std::process::id()));

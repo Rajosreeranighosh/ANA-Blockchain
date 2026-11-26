@@ -325,6 +325,43 @@ mod tests {
     }
 
     #[test]
+    fn chain_append_updates_shadow_root_and_replay_reproduces_it() {
+        let miner = SigningKey::generate(&mut OsRng);
+        let mut chain = ChainState::new();
+        let initial_root = chain.shadow_state_root().unwrap();
+
+        let block = chain.mine_next(address(&miner.verifying_key())).unwrap();
+        chain.append(block).unwrap();
+
+        let appended_root = chain.shadow_state_root().unwrap();
+        assert_ne!(initial_root, appended_root);
+        assert_eq!(chain.ledger.minted, BLOCK_REWARD);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chain.json");
+        chain.save(&path).unwrap();
+        let replayed = ChainState::load(&path).unwrap();
+
+        assert_eq!(replayed.blocks.len(), chain.blocks.len());
+        assert_eq!(replayed.ledger.minted, chain.ledger.minted);
+        assert_eq!(replayed.ledger.balances, chain.ledger.balances);
+        assert_eq!(replayed.ledger.nonces, chain.ledger.nonces);
+        assert_eq!(replayed.shadow_state_root().unwrap(), appended_root);
+    }
+
+    #[test]
+    fn invalid_chain_load_is_rejected_without_trusting_stored_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tampered-chain.json");
+        let mut state = ChainState::new();
+        state.ledger.minted = BLOCK_REWARD;
+        state.ledger.balances.insert("ana1tampered".into(), BLOCK_REWARD);
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        assert!(ChainState::load(&path).is_err());
+    }
+
+    #[test]
     fn shadow_state_root_is_independent_of_insertion_order() {
         let mut first = Ledger::default();
         first.balances.insert("ana1b".into(), 2);

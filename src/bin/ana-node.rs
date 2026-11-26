@@ -2,7 +2,7 @@ use ana_blockchain::{validate_address, Block, ChainState, Ledger, Transaction};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashSet, VecDeque},
     env,
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -51,7 +51,12 @@ struct NodeStatus {
 
 type SharedChain = Arc<Mutex<ChainState>>;
 type Peers = Arc<Vec<String>>;
-type Seen = Arc<Mutex<HashSet<String>>>;
+#[derive(Default)]
+struct SeenCache {
+    ids: HashSet<String>,
+    insertion_order: VecDeque<String>,
+}
+type Seen = Arc<Mutex<SeenCache>>;
 type Mempool = Arc<Mutex<BTreeMap<String, Transaction>>>;
 type SyncSessions = Arc<Mutex<BTreeMap<String, SyncSession>>>;
 struct SyncSession { blocks: Vec<Block>, last_updated: Instant }
@@ -277,13 +282,16 @@ fn persist_mempool_after_change(pool: &Mempool, data_file: &Path) {
     }
 }
 
-/// Bounded duplicate cache. Eviction is safe because ledger nonce, block linkage,
-/// and transaction validity checks remain authoritative on every acceptance.
+/// Bounded FIFO duplicate cache. Eviction is safe because ledger nonce, block
+/// linkage, and transaction validity checks remain authoritative on acceptance.
 fn remember_seen(seen: &Seen, id: String) -> bool {
-    let Ok(mut values) = seen.lock() else { return false; };
-    if !values.insert(id) { return false; }
-    if values.len() > MAX_SEEN_IDS {
-        if let Some(oldest) = values.iter().next().cloned() { values.remove(&oldest); }
+    let Ok(mut cache) = seen.lock() else { return false; };
+    if !cache.ids.insert(id.clone()) { return false; }
+    cache.insertion_order.push_back(id);
+    if cache.ids.len() > MAX_SEEN_IDS {
+        if let Some(oldest) = cache.insertion_order.pop_front() {
+            cache.ids.remove(&oldest);
+        }
     }
     true
 }
@@ -550,7 +558,7 @@ fn handle(
                     response(&mut stream, &transaction_ack(&id, "rejected"));
                     return;
                 }
-                if seen.lock().map(|values| values.contains(&id)).unwrap_or(true) {
+                if seen.lock().map(|cache| cache.ids.contains(&id)).unwrap_or(true) {
                     response(&mut stream, &transaction_ack(&id, "already_known"));
                     return;
                 }
@@ -611,8 +619,12 @@ fn main() -> Result<()> {
         load_mempool(&mempool_file, &state)?
     };
     println!("Restored {} pending transaction(s) from {}", restored.len(), mempool_file.display());
-    let restored_ids: HashSet<String> = restored.keys().cloned().take(MAX_SEEN_IDS).collect();
-    let seen: Seen = Arc::new(Mutex::new(restored_ids));
+    let mut restored_seen = SeenCache::default();
+    for id in restored.keys().take(MAX_SEEN_IDS) {
+        restored_seen.ids.insert(id.clone());
+        restored_seen.insertion_order.push_back(id.clone());
+    }
+    let seen: Seen = Arc::new(Mutex::new(restored_seen));
     let pool: Mempool = Arc::new(Mutex::new(restored));
 
     let listener = TcpListener::bind(bind)?;
@@ -725,13 +737,25 @@ mod tests {
 
     #[test]
     fn seen_cache_is_bounded_and_reports_duplicates() {
-        let seen: Seen = Arc::new(Mutex::new(HashSet::new()));
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
         assert!(remember_seen(&seen, "first".into()));
         assert!(!remember_seen(&seen, "first".into()));
         for index in 0..=MAX_SEEN_IDS {
             let _ = remember_seen(&seen, format!("id-{index}"));
         }
-        assert!(seen.lock().unwrap().len() <= MAX_SEEN_IDS);
+        assert!(seen.lock().unwrap().ids.len() <= MAX_SEEN_IDS);
+    }
+
+    #[test]
+    fn seen_cache_evicts_oldest_inserted_id_first() {
+        let seen: Seen = Arc::new(Mutex::new(SeenCache::default()));
+        assert!(remember_seen(&seen, "oldest".into()));
+        for index in 0..MAX_SEEN_IDS {
+            let _ = remember_seen(&seen, format!("new-{}", index));
+        }
+        let cache = seen.lock().unwrap();
+        assert!(!cache.ids.contains("oldest"));
+        assert!(cache.ids.contains(&format!("new-{}", MAX_SEEN_IDS - 1)));
     }
 
     #[test]

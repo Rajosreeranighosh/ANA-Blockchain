@@ -366,7 +366,7 @@ fn transaction_ack(id: &str, state: &str) -> Message {
     }
 }
 
-fn response(stream: &mut TcpStream, message: &Message) {
+fn response<S: Write>(stream: &mut S, message: &Message) {
     if let Ok(mut wire) = authenticated_wire(message) {
         wire.push(b'\n');
         let _ = stream.write_all(&wire);
@@ -442,14 +442,30 @@ fn handle(
     active_connections: Arc<AtomicUsize>,
     sync_sessions: SyncSessions,
 ) {
-    let _connection_guard = ConnectionGuard(active_connections);
+    let peer_is_loopback = stream.peer_addr().map(|address| address.ip().is_loopback()).unwrap_or(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
+    handle_transport(stream, peer_is_loopback, chain, peers, seen, pool, data_file, active_connections, sync_sessions);
+}
+
+/// Process newline-delimited peer messages over any Read + Write transport.
+/// This keeps protocol framing independent from the underlying TCP/TLS stream.
+fn handle_transport<S: Read + Write>(
+    mut stream: S,
+    peer_is_loopback: bool,
+    chain: SharedChain,
+    peers: Peers,
+    seen: Seen,
+    pool: Mempool,
+    data_file: PathBuf,
+    active_connections: Arc<AtomicUsize>,
+    sync_sessions: SyncSessions,
+) {
+    let _connection_guard = ConnectionGuard(active_connections);
     let mut line = Vec::new();
     let read_result = {
-        let cloned = match stream.try_clone() { Ok(value) => value, Err(_) => return };
-        let mut reader = BufReader::new(cloned);
-        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\n', &mut line)
+        let mut reader = BufReader::new(&mut stream);
+        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\\n', &mut line)
     };
     if read_result.is_err() || line.len() as u64 > MAX_MESSAGE_BYTES || line.last() != Some(&b'\n') {
         eprintln!("Rejected oversized, incomplete, or unreadable peer message");
@@ -464,7 +480,7 @@ fn handle(
             eprintln!("Rejected peer with invalid authentication token");
             return;
         }
-        None if !stream.peer_addr().map(|a| a.ip().is_loopback()).unwrap_or(false) => {
+        None if !peer_is_loopback => {
             eprintln!("Rejected non-loopback peer: set ANA_PEER_TOKEN on every node");
             return;
         }

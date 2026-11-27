@@ -536,6 +536,10 @@ fn handle(
     active_connections: Arc<AtomicUsize>,
     sync_sessions: SyncSessions,
 ) {
+    // Own the accepted-connection slot from function entry. Moving this
+    // guard into handle_transport transfers ownership; every TLS rejection,
+    // early return, and unwind releases the slot exactly once.
+    let connection_guard = ConnectionGuard(active_connections);
     let peer_is_loopback = stream.peer_addr().map(|address| address.ip().is_loopback()).unwrap_or(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
@@ -543,7 +547,6 @@ fn handle(
         let _handshake_guard = match TlsHandshakeGuard::try_acquire() {
             Some(guard) => guard,
             None => {
-                active_connections.fetch_sub(1, Ordering::SeqCst);
                 eprintln!("Rejected ANA mTLS peer: concurrent TLS handshake limit reached");
                 return;
             }
@@ -557,17 +560,16 @@ fn handle(
                     .and_then(|certificate| reserve_authenticated_peer_identity(certificate.as_ref(), ana_blockchain::NETWORK)) {
                     Ok(guard) => guard,
                     Err(error) => {
-                        active_connections.fetch_sub(1, Ordering::SeqCst);
                         eprintln!("Rejected duplicate or untrackable ANA mTLS peer: {error}");
                         return;
                     }
                 };
-                handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, active_connections, sync_sessions);
+                handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, connection_guard, sync_sessions);
             }
-            Err(error) => { active_connections.fetch_sub(1, Ordering::SeqCst); eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"); },
+            Err(error) => eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"),
         }
     } else {
-        handle_transport(stream, peer_is_loopback, chain, peers, seen, pool, data_file, active_connections, sync_sessions);
+        handle_transport(stream, peer_is_loopback, chain, peers, seen, pool, data_file, connection_guard, sync_sessions);
     }
 }
 
@@ -581,10 +583,9 @@ fn handle_transport<S: Read + Write>(
     seen: Seen,
     pool: Mempool,
     data_file: PathBuf,
-    active_connections: Arc<AtomicUsize>,
+    _connection_guard: ConnectionGuard,
     sync_sessions: SyncSessions,
 ) {
-    let _connection_guard = ConnectionGuard(active_connections);
     let mut line = Vec::new();
     let read_result = {
         let mut reader = BufReader::new(&mut stream);
@@ -1558,7 +1559,7 @@ mod network_security_tests {
                 Arc::new(Mutex::new(SeenCache::default())),
                 server_pool,
                 server_data,
-                server_active,
+                ConnectionGuard(server_active),
                 Arc::new(Mutex::new(BTreeMap::new())),
             );
         });

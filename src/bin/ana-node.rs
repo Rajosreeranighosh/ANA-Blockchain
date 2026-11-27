@@ -1320,7 +1320,7 @@ mod network_security_tests {
         let chain: SharedChain = Arc::new(Mutex::new(state));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
         let active = Arc::new(AtomicUsize::new(0));
-        let data_file = temp_file("mtls-transaction");
+        let data_file = std::env::temp_dir().join(format!("ana-mtls-transaction-{}.json", std::process::id()));
         let server_chain = chain.clone();
         let server_pool = pool.clone();
         let server_active = active.clone();

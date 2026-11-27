@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::{
     env,
     io::{BufRead, BufReader, Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{atomic::{AtomicUsize, Ordering}, Arc},
     thread,
     time::Duration,
@@ -92,7 +92,7 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<(String, Option<Stri
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
-    reader.take((MAX_REQUEST_LINE + 1) as u64).read_line(&mut request_line)?;
+    (&mut reader).take((MAX_REQUEST_LINE + 1) as u64).read_line(&mut request_line)?;
     if request_line.len() > MAX_REQUEST_LINE || !request_line.ends_with("\r\n") {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid request line"));
     }

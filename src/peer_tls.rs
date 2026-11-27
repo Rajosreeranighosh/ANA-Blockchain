@@ -1,9 +1,9 @@
 //! Strict TLS 1.3 configuration primitives for ANA peer transport.
 //!
-//! This module is intentionally not wired into the TCP listener yet. The
-//! listener remains loopback-only until authenticated ANA URI-SAN identity
-//! verification, CRL issuer/freshness policy, handshake deadlines, and the
-//! complete positive/negative integration-test matrix are implemented.
+//! The live node uses these primitives when all mTLS credentials and explicit
+//! per-peer pins are configured. Public deployment remains gated on duplicate
+//! identity handling, bounded handshake work, full negative-test coverage,
+//! cross-platform CI, operational guidance, and independent security review.
 
 use anyhow::{bail, Context, Result};
 use rustls::{

@@ -930,6 +930,15 @@ mod tests {
         ))
     }
 
+    fn fixture_node_id(path: &Path) -> String {
+        let file = fs::File::open(path).unwrap();
+        let certificate = rustls_pemfile::certs(&mut BufReader::new(file))
+            .next().unwrap().unwrap();
+        ana_blockchain::peer_tls::verify_peer_identity(
+            certificate.as_ref(), "testnet", None
+        ).unwrap().node_id
+    }
+
     #[test]
     fn duplicate_simultaneous_mtls_connections_are_rejected_until_first_closes() {
         use std::sync::mpsc;

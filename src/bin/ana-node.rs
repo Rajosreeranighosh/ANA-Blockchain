@@ -139,12 +139,40 @@ struct PeerTls {
     pins: PeerPinConfig,
 }
 static PEER_TLS: OnceLock<PeerTls> = OnceLock::new();
+static ACTIVE_AUTHENTICATED_PEERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Reserves one authenticated certificate identity for the lifetime of its
+/// inbound connection. A duplicate node identity is rejected; Drop releases
+/// the reservation on every normal return and unwind path.
+struct PeerIdentityGuard(String);
+
+impl PeerIdentityGuard {
+    fn reserve(node_id: String) -> Result<Self> {
+        let registry = ACTIVE_AUTHENTICATED_PEERS.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut active = registry.lock()
+            .map_err(|_| anyhow::anyhow!("authenticated peer identity registry lock poisoned"))?;
+        if !active.insert(node_id.clone()) {
+            bail!("duplicate simultaneous authenticated ANA node identity");
+        }
+        Ok(Self(node_id))
+    }
+}
+
+impl Drop for PeerIdentityGuard {
+    fn drop(&mut self) {
+        if let Some(registry) = ACTIVE_AUTHENTICATED_PEERS.get() {
+            if let Ok(mut active) = registry.lock() {
+                active.remove(&self.0);
+            }
+        }
+    }
+}
 
 fn peer_tls_from_env(configured_peers: &[String]) -> Result<Option<PeerTls>> {
     const REQUIRED: [&str; 7] = ["ANA_PEER_CA", "ANA_PEER_CRL", "ANA_PEER_CERT", "ANA_PEER_KEY", "ANA_PEER_SERVER_NAME", "ANA_PEER_PINS", "ANA_PEER_ALLOWED_NODE_IDS"];
     let supplied = REQUIRED.iter().filter(|name| env::var_os(name).is_some()).count();
     if supplied == 0 { return Ok(None); }
-    if supplied != REQUIRED.len() { bail!("mTLS requires all five ANA_PEER_* credential variables"); }
+    if supplied != REQUIRED.len() { bail!("mTLS requires all seven ANA_PEER_* credential and pin variables"); }
     let path = |name: &str| -> Result<PathBuf> { Ok(PathBuf::from(env::var(name)?)) };
     let ca = path("ANA_PEER_CA")?; let crl = path("ANA_PEER_CRL")?;
     let cert = path("ANA_PEER_CERT")?; let key = path("ANA_PEER_KEY")?;
@@ -484,7 +512,30 @@ fn handle(
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     if let Some(tls) = PEER_TLS.get() {
         match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK, tls.pins.inbound_ids()) {
-            Ok(secure_stream) => handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, active_connections, sync_sessions),
+            Ok(secure_stream) => {
+                let identity = secure_stream.conn.peer_certificates()
+                    .and_then(|certificates| certificates.first())
+                    .and_then(|certificate| ana_blockchain::peer_tls::verify_peer_identity(
+                        certificate.as_ref(), ana_blockchain::NETWORK, None
+                    ).ok());
+                let identity = match identity {
+                    Some(value) => value,
+                    None => {
+                        active_connections.fetch_sub(1, Ordering::SeqCst);
+                        eprintln!("Rejected ANA mTLS peer without a valid authenticated node identity");
+                        return;
+                    }
+                };
+                let _identity_guard = match PeerIdentityGuard::reserve(identity.node_id) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        active_connections.fetch_sub(1, Ordering::SeqCst);
+                        eprintln!("Rejected duplicate or untrackable ANA mTLS peer: {error}");
+                        return;
+                    }
+                };
+                handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, active_connections, sync_sessions);
+            }
             Err(error) => { active_connections.fetch_sub(1, Ordering::SeqCst); eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"); },
         }
     } else {
@@ -879,6 +930,15 @@ mod tests {
             "ana-{label}-{}-{sequence}.json",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn authenticated_node_identity_is_unique_until_connection_closes() {
+        let node_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let first = PeerIdentityGuard::reserve(node_id.to_owned()).unwrap();
+        assert!(PeerIdentityGuard::reserve(node_id.to_owned()).is_err());
+        drop(first);
+        assert!(PeerIdentityGuard::reserve(node_id.to_owned()).is_ok());
     }
 
     #[test]

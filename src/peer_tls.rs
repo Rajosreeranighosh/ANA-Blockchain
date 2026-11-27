@@ -23,6 +23,8 @@ use std::{
 use x509_parser::prelude::{parse_x509_certificate, GeneralName};
 
 const ALPN_PROTOCOL: &[u8] = b"ana-peer/1";
+/// Maximum DER size accepted for a single ANA peer end-entity certificate.
+const MAX_PEER_CERTIFICATE_DER_BYTES: usize = 64 * 1024;
 
 /// Authenticated identity extracted from a certificate that rustls has already
 /// accepted under the configured CA, validity, EKU, key-usage, and CRL policy.
@@ -60,6 +62,9 @@ pub fn verify_peer_identity(
     expected_network_name: &str,
     expected_node_id: Option<&str>,
 ) -> Result<PeerIdentity> {
+    if certificate_der.len() > MAX_PEER_CERTIFICATE_DER_BYTES {
+        bail!("ANA peer certificate exceeds the 64 KiB DER size limit");
+    }
     let (remaining, certificate) = parse_x509_certificate(certificate_der)
         .map_err(|error| anyhow::anyhow!("invalid peer X.509 certificate: {error}"))?;
     if !remaining.is_empty() {
@@ -471,6 +476,13 @@ mod tests {
     #[test]
     fn duplicate_san_extension_is_rejected() {
         assert!(verify_peer_identity(&fixture_certificate("duplicate-san"), "testnet", None).is_err());
+    }
+
+    #[test]
+    fn oversized_peer_certificate_is_rejected_before_x509_parsing() {
+        let oversized = vec![0u8; MAX_PEER_CERTIFICATE_DER_BYTES + 1];
+        let error = verify_peer_identity(&oversized, "testnet", None).unwrap_err();
+        assert!(error.to_string().contains("64 KiB DER size limit"));
     }
 
     #[test]

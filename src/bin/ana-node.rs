@@ -475,7 +475,14 @@ fn handle(
     let peer_is_loopback = stream.peer_addr().map(|address| address.ip().is_loopback()).unwrap_or(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
-    handle_transport(stream, peer_is_loopback, chain, peers, seen, pool, data_file, active_connections, sync_sessions);
+    if let Some(tls) = PEER_TLS.get() {
+        match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK) {
+            Ok(secure_stream) => handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, active_connections, sync_sessions),
+            Err(error) => eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"),
+        }
+    } else {
+        handle_transport(stream, peer_is_loopback, chain, peers, seen, pool, data_file, active_connections, sync_sessions);
+    }
 }
 
 /// Process newline-delimited peer messages over any Read + Write transport.
@@ -719,9 +726,20 @@ fn main() -> Result<()> {
         Some(args[3].clone())
     };
     let configured_peers: Vec<String> = args.iter().skip(4).cloned().collect();
-    validate_bind_security(bind)?;
-    for peer in &configured_peers {
-        validate_peer_security(peer)?;
+    let tls_config = peer_tls_from_env()?;
+    let tls_enabled = tls_config.is_some();
+    if let Some(config) = tls_config {
+        PEER_TLS.set(config).map_err(|_| anyhow::anyhow!("ANA peer TLS configuration already initialized"))?;
+        println!("ANA peer transport: TLS 1.3 mutual authentication, ANA identity, and ana-peer/1 ALPN enabled.");
+    } else {
+        validate_bind_security(bind)?;
+        for peer in &configured_peers { validate_peer_security(peer)?; }
+        println!("ANA peer transport: loopback-only plaintext compatibility mode; remote peers disabled.");
+    }
+    if tls_enabled {
+        let addresses: Vec<_> = bind.to_socket_addrs()?.collect();
+        if addresses.is_empty() { bail!("node bind address resolved to no socket addresses"); }
+        for peer in &configured_peers { resolve_tls_peer(peer)?; }
     }
     let peers: Peers = Arc::new(configured_peers);
     let chain = Arc::new(Mutex::new(ChainState::load(&data_file)?));

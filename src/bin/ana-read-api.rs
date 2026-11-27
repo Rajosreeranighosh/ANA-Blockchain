@@ -88,15 +88,15 @@ fn send_json<T: Serialize>(
     response(stream, status, &body, origin, allowed_origin)
 }
 
-fn parse_request(stream: &mut TcpStream) -> std::io::Result<(String, Option<String>)> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    let mut reader = BufReader::new(stream);
+fn parse_request_reader<R: BufRead>(reader: &mut R) -> std::io::Result<(String, Option<String>)> {
     let mut request_line = String::new();
-    (&mut reader).take((MAX_REQUEST_LINE + 1) as u64).read_line(&mut request_line)?;
-    if request_line.len() > MAX_REQUEST_LINE || !request_line.ends_with("\r\n") {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid request line"));
+    reader.take((MAX_REQUEST_LINE + 1) as u64).read_line(&mut request_line)?;
+    if request_line.len() > MAX_REQUEST_LINE {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "oversized request line"));
     }
-    let mut parts = request_line.trim_end().split_ascii_whitespace();
+    let request_line = request_line.strip_suffix("\\r\\n")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "request line must end in CRLF"))?;
+    let mut parts = request_line.split_ascii_whitespace();
     let method = parts.next().unwrap_or("");
     let path = parts.next().unwrap_or("");
     let version = parts.next().unwrap_or("");
@@ -106,8 +106,11 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<(String, Option<Stri
     if !path.starts_with("/api/v1/") || path.contains('?') || path.contains('#') || path.contains('%') {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"));
     }
-    let mut total = request_line.len();
+
+    let mut total = request_line.len() + 2;
     let mut origin = None;
+    let mut content_length = None;
+    let mut host_count = 0usize;
     loop {
         let mut line = String::new();
         let count = reader.read_line(&mut line)?;
@@ -115,23 +118,55 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<(String, Option<Stri
         if count == 0 || total > MAX_HEADER_BYTES {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "incomplete or oversized headers"));
         }
-        if line == "\r\n" { break; }
-        if line.starts_with("Origin:") {
-            let value = line[7..].trim();
-            if value.len() > 512 || value.contains('\r') || value.contains('\n') {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid origin"));
+        if line == "\\r\\n" { break; }
+        let raw = line.strip_suffix("\\r\\n")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "header must end in CRLF"))?;
+        if raw.starts_with(' ') || raw.starts_with('\\t') {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "folded headers are not supported"));
+        }
+        let (name, value) = raw.split_once(':')
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed header"))?;
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid header name"));
+        }
+        let value = value.trim();
+        if value.bytes().any(|b| (b < 0x20 && b != b'\\t') || b == 0x7f) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid header value"));
+        }
+        if name.eq_ignore_ascii_case("host") {
+            host_count += 1;
+            if value.is_empty() || host_count > 1 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid or duplicate Host header"));
+            }
+        } else if name.eq_ignore_ascii_case("origin") {
+            if origin.is_some() || value.len() > 512 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid or duplicate Origin header"));
             }
             origin = Some(value.to_owned());
-        }
-        if line.to_ascii_lowercase().starts_with("content-length:") &&
-            line.split_once(':').map(|(_, value)| value.trim() != "0").unwrap_or(true) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "request bodies are not supported"));
-        }
-        if line.to_ascii_lowercase().starts_with("transfer-encoding:") {
+        } else if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "duplicate Content-Length"));
+            }
+            let parsed = value.parse::<u64>()
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid Content-Length"))?;
+            content_length = Some(parsed);
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "request bodies are not supported"));
         }
     }
+    if version == "HTTP/1.1" && host_count != 1 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "HTTP/1.1 requires exactly one Host header"));
+    }
+    if content_length.unwrap_or(0) != 0 {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "request bodies are not supported"));
+    }
     Ok((path.to_owned(), origin))
+}
+
+fn parse_request(stream: &mut TcpStream) -> std::io::Result<(String, Option<String>)> {
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    let mut reader = BufReader::new(stream);
+    parse_request_reader(&mut reader)
 }
 
 fn handle(mut stream: TcpStream, node: Arc<NodeClient>, allowed_origin: Option<Arc<String>>) {

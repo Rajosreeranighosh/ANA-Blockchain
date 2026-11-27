@@ -465,7 +465,7 @@ fn handle_transport<S: Read + Write>(
     let mut line = Vec::new();
     let read_result = {
         let mut reader = BufReader::new(&mut stream);
-        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\\n', &mut line)
+        reader.by_ref().take(MAX_MESSAGE_BYTES + 1).read_until(b'\n', &mut line)
     };
     if read_result.is_err() || line.len() as u64 > MAX_MESSAGE_BYTES || line.last() != Some(&b'\n') {
         eprintln!("Rejected oversized, incomplete, or unreadable peer message");

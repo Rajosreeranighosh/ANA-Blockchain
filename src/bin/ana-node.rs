@@ -1330,7 +1330,7 @@ mod network_security_tests {
             let (tcp, _) = listener.accept().unwrap();
             tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let stream = accept_authenticated(tcp, server_config, ana_blockchain::NETWORK).unwrap();
+            let stream = accept_authenticated(tcp, server_config, "testnet").unwrap();
             handle_transport(
                 stream,
                 true,
@@ -1351,7 +1351,7 @@ mod network_security_tests {
             tcp,
             client_config,
             "ana-peer.invalid",
-            ana_blockchain::NETWORK,
+            "testnet",
         ).unwrap();
         let request = Message {
             kind: "transaction".into(),

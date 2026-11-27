@@ -388,7 +388,7 @@ mod tests {
             .join(name)
     }
 
-    fn assert_tls_handshake_rejected(client_config: Arc<ClientConfig>) {
+    fn assert_tls_handshake_rejected(client_config: Arc<ClientConfig>, server_crl: &str) {
         use std::{
             io::{Read, Write},
             net::{TcpListener, TcpStream},
@@ -399,7 +399,7 @@ mod tests {
 
         let server_config = load_server_config(
             &test_fixture("mtls-ca.pem"),
-            &test_fixture("mtls-crl.pem"),
+            &test_fixture(server_crl),
             &test_fixture("mtls-server.pem"),
             &test_fixture("mtls-server.key"),
         )
@@ -438,7 +438,7 @@ mod tests {
             .with_root_certificates((*roots).clone())
             .with_client_auth_cert(certs, key)
             .unwrap();
-        assert_tls_handshake_rejected(Arc::new(config));
+        assert_tls_handshake_rejected(Arc::new(config), "mtls-crl.pem");
     }
 
     #[test]
@@ -448,6 +448,18 @@ mod tests {
             .with_root_certificates((*roots).clone())
             .with_no_client_auth();
         assert_tls_handshake_rejected(Arc::new(config));
+    }
+
+    #[test]
+    fn revoked_client_certificate_is_rejected_during_tls_handshake() {
+        let roots = read_trust_roots(&test_fixture("mtls-ca.pem")).unwrap();
+        let certs = read_certificates(&test_fixture("mtls-client.pem"), "test client").unwrap();
+        let key = read_private_key(&test_fixture("mtls-client.key")).unwrap();
+        let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates((*roots).clone())
+            .with_client_auth_cert(certs, key)
+            .unwrap();
+        assert_tls_handshake_rejected(Arc::new(config), "mtls-revoked-client-crl.pem");
     }
 
     #[test]

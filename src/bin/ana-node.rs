@@ -1,4 +1,5 @@
 use ana_blockchain::{validate_address, Block, ChainState, Ledger, Transaction};
+use ana_blockchain::peer_tls::{accept_authenticated, connect_authenticated, load_client_config, load_server_config};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -8,7 +9,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
-    sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex},
+    sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -130,6 +131,34 @@ const MAX_MEMPOOL_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
 const SOCKET_TIMEOUT_SECS: u64 = 10;
 
+
+struct PeerTls {
+    server: Arc<rustls::ServerConfig>,
+    client: Arc<rustls::ClientConfig>,
+    server_name: String,
+}
+static PEER_TLS: OnceLock<PeerTls> = OnceLock::new();
+
+fn peer_tls_from_env() -> Result<Option<PeerTls>> {
+    const REQUIRED: [&str; 5] = ["ANA_PEER_CA", "ANA_PEER_CRL", "ANA_PEER_CERT", "ANA_PEER_KEY", "ANA_PEER_SERVER_NAME"];
+    let supplied = REQUIRED.iter().filter(|name| env::var_os(name).is_some()).count();
+    if supplied == 0 { return Ok(None); }
+    if supplied != REQUIRED.len() { bail!("mTLS requires all five ANA_PEER_* credential variables"); }
+    let path = |name: &str| -> Result<PathBuf> { Ok(PathBuf::from(env::var(name)?)) };
+    let ca = path("ANA_PEER_CA")?; let crl = path("ANA_PEER_CRL")?;
+    let cert = path("ANA_PEER_CERT")?; let key = path("ANA_PEER_KEY")?;
+    let server_name = env::var("ANA_PEER_SERVER_NAME")?;
+    if server_name.trim().is_empty() { bail!("ANA_PEER_SERVER_NAME must not be empty"); }
+    Ok(Some(PeerTls {
+        server: load_server_config(&ca, &crl, &cert, &key)?,
+        client: load_client_config(&ca, &crl, &cert, &key)?,
+        server_name,
+    }))
+}
+
+fn resolve_tls_peer(peer: &str) -> Result<std::net::SocketAddr> {
+    peer.to_socket_addrs()?.next().context("TLS peer resolved to no addresses")
+}
 /// Bounded per-source connection-attempt limiter. Entries expire after one
 /// window; the map itself is capped so source churn cannot grow memory forever.
 #[derive(Default)]
@@ -233,21 +262,22 @@ impl Drop for ConnectionGuard {
 
 
 fn send(peer: &str, message: &Message) {
-    let address = match resolve_loopback_peer(peer) {
+    let tls = PEER_TLS.get();
+    let address = match if tls.is_some() { resolve_tls_peer(peer) } else { resolve_loopback_peer(peer) } {
         Ok(value) => value,
-        Err(error) => {
-            eprintln!("Refusing outbound peer connection: {error}");
-            return;
-        }
+        Err(error) => { eprintln!("Refusing outbound peer connection: {error}"); return; }
     };
-    if let Ok(mut stream) = TcpStream::connect_timeout(
-        &address,
-        Duration::from_secs(SOCKET_TIMEOUT_SECS),
-    ) {
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
+    if let Ok(mut tcp) = TcpStream::connect_timeout(&address, Duration::from_secs(SOCKET_TIMEOUT_SECS)) {
+        let _ = tcp.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
+        let _ = tcp.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
         if let Ok(mut wire) = authenticated_wire(message) {
             wire.push(b'\n');
-            let _ = stream.write_all(&wire);
+            if let Some(tls) = tls {
+                match connect_authenticated(tcp, tls.client.clone(), &tls.server_name, ana_blockchain::NETWORK) {
+                    Ok(mut stream) => { let _ = stream.write_all(&wire); }
+                    Err(error) => eprintln!("Outbound ANA mTLS authentication failed: {error}"),
+                }
+            } else { let _ = tcp.write_all(&wire); }
         }
     }
 }

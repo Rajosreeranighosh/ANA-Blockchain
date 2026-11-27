@@ -57,7 +57,7 @@ The initial deployment model should use an operator-managed private CA per netwo
 
 Do not treat a shared ANA_PEER_TOKEN as peer identity. Remove it from the wire protocol only after migration behavior is specified. Do not accept an empty trust store or silently trust any self-signed certificate.
 
-A future pinned-peer mode may be added, but it must use explicit public-key fingerprints and the same network-identity checks. It must not weaken CA verification by default.
+An additional per-peer SPKI pinning authorization layer is implemented after standard CA/WebPKI and CRL validation. Outbound endpoints require exact configured node-ID pins, and inbound connections require an explicit node-ID allowlist. Pinning does not replace or weaken CA verification, TLS 1.3, ALPN, or ANA network-identity checks.
 
 ## 4. Rotation and revocation
 
@@ -171,7 +171,7 @@ After chain validation, parse the authenticated peer certificate and require exa
 
 ## 9. Required negative-test matrix
 
-The transport test suite must exercise both client and server verification paths and assert handshake failure (not merely an application-layer rejection) for:
+The transport test suite must exercise both client and server verification paths. Tests now cover wrong outbound SPKI pins and inbound identities outside the allowlist after a valid TLS handshake; these are authorization rejections, not TLS certificate-chain handshake failures. The suite must assert TLS handshake failure (not merely an application-layer rejection) for:
 
 1. No client certificate when the server requires mTLS.
 2. No server certificate / plaintext peer attempting to speak the JSON protocol.

@@ -168,9 +168,9 @@ impl Drop for PeerIdentityGuard {
     }
 }
 
-fn reserve_authenticated_peer_identity(certificate_der: &[u8]) -> Result<PeerIdentityGuard> {
+fn reserve_authenticated_peer_identity(certificate_der: &[u8], network_name: &str) -> Result<PeerIdentityGuard> {
     let identity = ana_blockchain::peer_tls::verify_peer_identity(
-        certificate_der, ana_blockchain::NETWORK, None
+        certificate_der, network_name, None
     ).context("authenticated peer certificate has an invalid ANA node identity")?;
     PeerIdentityGuard::reserve(identity.node_id)
 }
@@ -524,7 +524,7 @@ fn handle(
                     .and_then(|certificates| certificates.first());
                 let _identity_guard = match peer_certificate
                     .ok_or_else(|| anyhow::anyhow!("authenticated peer did not expose its certificate"))
-                    .and_then(|certificate| reserve_authenticated_peer_identity(certificate.as_ref())) {
+                    .and_then(|certificate| reserve_authenticated_peer_identity(certificate.as_ref(), ana_blockchain::NETWORK)) {
                     Ok(guard) => guard,
                     Err(error) => {
                         active_connections.fetch_sub(1, Ordering::SeqCst);
@@ -936,8 +936,8 @@ mod tests {
             .join("tests").join("fixtures").join("mtls-client.pem");
         let certificate = rustls_pemfile::certs(&mut BufReader::new(fs::File::open(fixture).unwrap()))
             .next().unwrap().unwrap();
-        let first = reserve_authenticated_peer_identity(certificate.as_ref()).unwrap();
-        assert!(reserve_authenticated_peer_identity(certificate.as_ref()).is_err());
+        let first = reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").unwrap();
+        assert!(reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").is_err());
         drop(first);
         assert!(reserve_authenticated_peer_identity(certificate.as_ref()).is_ok());
     }

@@ -544,14 +544,19 @@ fn handle(
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     if let Some(tls) = PEER_TLS.get() {
-        let _handshake_guard = match TlsHandshakeGuard::try_acquire() {
-            Some(guard) => guard,
-            None => {
-                eprintln!("Rejected ANA mTLS peer: concurrent TLS handshake limit reached");
-                return;
-            }
+        // Release the handshake slot immediately after TLS authentication;
+        // established peer sessions are governed by MAX_CONNECTIONS instead.
+        let authenticated = {
+            let _handshake_guard = match TlsHandshakeGuard::try_acquire() {
+                Some(guard) => guard,
+                None => {
+                    eprintln!("Rejected ANA mTLS peer: concurrent TLS handshake limit reached");
+                    return;
+                }
+            };
+            accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK, tls.pins.inbound_ids())
         };
-        match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK, tls.pins.inbound_ids()) {
+        match authenticated {
             Ok(secure_stream) => {
                 let peer_certificate = secure_stream.conn.peer_certificates()
                     .and_then(|certificates| certificates.first());

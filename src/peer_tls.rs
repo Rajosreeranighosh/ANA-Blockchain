@@ -795,7 +795,7 @@ mod tests {
 
         assert!(
             rustls::server::danger::ClientCertVerifier::verify_client_cert(
-                &verifier, &certs[0], &[], now
+                verifier.as_ref(), &certs[0], &[], now
             ).is_err(),
             "an otherwise trusted client certificate must be rejected after notAfter"
         );
@@ -821,7 +821,7 @@ mod tests {
 
         assert!(
             rustls::server::danger::ClientCertVerifier::verify_client_cert(
-                &verifier, &certs[0], &[], now
+                verifier.as_ref(), &certs[0], &[], now
             ).is_err(),
             "a serverAuth-only certificate must be rejected for client authentication"
         );

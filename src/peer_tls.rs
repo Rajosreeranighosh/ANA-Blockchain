@@ -806,16 +806,20 @@ mod tests {
         use rustls::pki_types::UnixTime;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let roots = read_trust_roots(&test_fixture("mtls-ca.pem")).unwrap();
-        let crls = read_required_crls(&test_fixture("mtls-crl.pem")).unwrap();
-        let verifier = WebPkiClientVerifier::builder(roots)
-            .with_crls(crls)
-            .enforce_revocation_expiration()
-            .build()
-            .unwrap();
-        // This CA-issued fixture is the server's identity, not a client identity.
-        // Its serverAuth EKU must not authorize it for mutual-TLS client auth.
-        let certs = read_certificates(&test_fixture("mtls-server.pem"), "test server").unwrap();
+        // This dedicated test CA signs a leaf whose EKU is exactly serverAuth.
+        // It intentionally has no clientAuth EKU and is not the dual-use mTLS
+        // server fixture used by the transport integration tests.
+        let roots = read_trust_roots(&test_fixture("peer-eku-test-ca.pem")).unwrap();
+        let verifier = WebPkiClientVerifier::builder(roots).build().unwrap();
+        let certs = read_certificates(
+            &test_fixture("peer-server-auth-only.pem"),
+            "serverAuth-only test certificate",
+        )
+        .unwrap();
+        let (_, parsed) = parse_x509_certificate(certs[0].as_ref()).unwrap();
+        let eku = parsed.extended_key_usage().unwrap().unwrap();
+        assert!(eku.value.server_auth);
+        assert!(!eku.value.client_auth);
         let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let now = UnixTime::since_unix_epoch(elapsed);
 

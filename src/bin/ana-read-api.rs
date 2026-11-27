@@ -94,7 +94,7 @@ fn parse_request_reader<R: BufRead>(reader: &mut R) -> std::io::Result<(String, 
     if request_line.len() > MAX_REQUEST_LINE {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "oversized request line"));
     }
-    let request_line = request_line.strip_suffix("\\r\\n")
+    let request_line = request_line.strip_suffix("\r\n")
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "request line must end in CRLF"))?;
     let mut parts = request_line.split_ascii_whitespace();
     let method = parts.next().unwrap_or("");
@@ -118,10 +118,10 @@ fn parse_request_reader<R: BufRead>(reader: &mut R) -> std::io::Result<(String, 
         if count == 0 || total > MAX_HEADER_BYTES {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "incomplete or oversized headers"));
         }
-        if line == "\\r\\n" { break; }
-        let raw = line.strip_suffix("\\r\\n")
+        if line == "\r\n" { break; }
+        let raw = line.strip_suffix("\r\n")
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "header must end in CRLF"))?;
-        if raw.starts_with(' ') || raw.starts_with('\\t') {
+        if raw.starts_with(' ') || raw.starts_with('\t') {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "folded headers are not supported"));
         }
         let (name, value) = raw.split_once(':')
@@ -130,7 +130,7 @@ fn parse_request_reader<R: BufRead>(reader: &mut R) -> std::io::Result<(String, 
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid header name"));
         }
         let value = value.trim();
-        if value.bytes().any(|b| (b < 0x20 && b != b'\\t') || b == 0x7f) {
+        if value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid header value"));
         }
         if name.eq_ignore_ascii_case("host") {

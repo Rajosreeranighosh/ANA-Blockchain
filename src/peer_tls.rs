@@ -52,8 +52,8 @@ fn validate_peer_certificate_chain(certificates: &[CertificateDer<'_>]) -> Resul
 }
 
 /// Authenticated identity extracted from a certificate that rustls has already
-/// accepted under the configured CA, validity, EKU, key-usage, and CRL policy.
-/// This parser does not replace TLS certificate-chain validation.
+/// accepted under the configured CA, validity, EKU, and CRL policy. ANA separately
+/// enforces the TLS digitalSignature Key Usage requirement before accepting peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerIdentity {
     pub network_id: String,
@@ -75,6 +75,29 @@ pub fn network_id(network_name: &str) -> Result<String> {
 /// peer-transport certificate profile.
 pub fn node_id_from_spki(spki_der: &[u8]) -> String {
     hex::encode(Sha256::digest(spki_der))
+}
+
+/// Enforce the TLS peer-certificate Key Usage required by ANA's TLS 1.3 profile.
+/// rustls-webpki validates the certificate chain and EKU, but the observed
+/// verifier behavior does not reject keyEncipherment-only client certificates.
+/// Require an explicit Key Usage extension containing digitalSignature.
+fn verify_peer_key_usage(certificate_der: &[u8]) -> Result<()> {
+    if certificate_der.len() > MAX_PEER_CERTIFICATE_DER_BYTES {
+        bail!("ANA peer certificate exceeds the 64 KiB DER size limit");
+    }
+    let (remaining, certificate) = parse_x509_certificate(certificate_der)
+        .map_err(|error| anyhow::anyhow!("invalid peer X.509 certificate: {error}"))?;
+    if !remaining.is_empty() {
+        bail!("peer certificate contains trailing DER data");
+    }
+    let key_usage = certificate
+        .key_usage()
+        .context("peer certificate has an invalid or duplicate Key Usage extension")?
+        .context("peer certificate is missing its Key Usage extension")?;
+    if !key_usage.value.digital_signature() {
+        bail!("ANA TLS peer certificate Key Usage must include digitalSignature");
+    }
+    Ok(())
 }
 
 /// Verify the exact single URI SAN `ana://<network-id>/<node-id>`.
@@ -354,6 +377,8 @@ pub fn accept_authenticated(
         .context("ANA peer TLS client did not present a certificate")?;
     validate_peer_certificate_chain(certificates)?;
     let peer = certificates.first().context("ANA peer TLS client certificate chain is empty")?;
+    verify_peer_key_usage(peer.as_ref())
+        .context("ANA peer TLS client Key Usage verification failed")?;
     let identity = verify_peer_identity(peer.as_ref(), network_name, None)
         .context("ANA peer TLS client identity verification failed")?;
     if !allowed_node_ids.contains(&identity.node_id) {
@@ -395,6 +420,8 @@ pub fn connect_authenticated(
         .context("ANA peer TLS server did not present a certificate")?;
     validate_peer_certificate_chain(certificates)?;
     let peer = certificates.first().context("ANA peer TLS server certificate chain is empty")?;
+    verify_peer_key_usage(peer.as_ref())
+        .context("ANA peer TLS server Key Usage verification failed")?;
     verify_peer_identity(peer.as_ref(), network_name, Some(expected_node_id))
         .context("ANA peer TLS server identity verification failed")?;
     Ok(rustls::StreamOwned::new(connection, tcp))
@@ -855,11 +882,17 @@ mod tests {
 
         let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let now = UnixTime::since_unix_epoch(elapsed);
+        // The WebPKI verifier alone accepts this otherwise trusted leaf, so
+        // ANA's explicit post-handshake peer policy must reject it.
         assert!(
             rustls::server::danger::ClientCertVerifier::verify_client_cert(
                 verifier.as_ref(), &certs[0], &[], now
-            ).is_err(),
-            "a client certificate without digitalSignature Key Usage must be rejected"
+            ).is_ok(),
+            "fixture must be otherwise valid under the CA and clientAuth EKU"
+        );
+        assert!(
+            verify_peer_key_usage(certs[0].as_ref()).is_err(),
+            "ANA peer policy must reject a client certificate without digitalSignature"
         );
     }
 

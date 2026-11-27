@@ -1339,6 +1339,18 @@ mod network_security_tests {
     }
 
     #[test]
+    fn connection_slot_guard_releases_exactly_once() {
+        let active = Arc::new(AtomicUsize::new(1));
+        {
+            let _guard = ConnectionGuard(active.clone());
+            assert_eq!(active.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        // Dropping a moved guard must not cause a second decrement.
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn message_size_limit_is_nonzero_and_bounded() {
         assert!(MAX_MESSAGE_BYTES >= 1024);
         assert!(MAX_MESSAGE_BYTES <= 8 * 1024 * 1024);

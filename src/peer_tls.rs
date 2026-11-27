@@ -18,6 +18,7 @@ use std::{
     io::BufReader,
     path::Path,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use x509_parser::prelude::{parse_x509_certificate, GeneralName};
 
@@ -303,7 +304,16 @@ pub fn accept_authenticated(
 ) -> Result<rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>> {
     let mut connection = rustls::ServerConnection::new(config)
         .context("could not create ANA TLS server connection")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
     while connection.is_handshaking() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("ANA peer TLS server handshake exceeded its 10-second deadline");
+        }
+        tcp.set_read_timeout(Some(remaining))
+            .context("could not set ANA TLS server handshake read deadline")?;
+        tcp.set_write_timeout(Some(remaining))
+            .context("could not set ANA TLS server handshake write deadline")?;
         connection.complete_io(&mut tcp)
             .context("ANA peer TLS server handshake failed")?;
     }
@@ -334,7 +344,16 @@ pub fn connect_authenticated(
         .context("invalid ANA peer TLS server name")?;
     let mut connection = rustls::ClientConnection::new(config, name)
         .context("could not create ANA TLS client connection")?;
+    let deadline = Instant::now() + Duration::from_secs(10);
     while connection.is_handshaking() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("ANA peer TLS client handshake exceeded its 10-second deadline");
+        }
+        tcp.set_read_timeout(Some(remaining))
+            .context("could not set ANA TLS client handshake read deadline")?;
+        tcp.set_write_timeout(Some(remaining))
+            .context("could not set ANA TLS client handshake write deadline")?;
         connection.complete_io(&mut tcp)
             .context("ANA peer TLS client handshake failed")?;
     }

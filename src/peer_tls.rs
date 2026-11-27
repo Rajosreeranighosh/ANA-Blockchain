@@ -117,6 +117,76 @@ pub fn verify_peer_identity(
     })
 }
 
+
+/// Strict operator-managed mapping from outbound endpoints to certificate
+/// SPKI fingerprints, plus the explicit inbound identity allowlist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerPinConfig {
+    outbound: std::collections::BTreeMap<String, String>,
+    inbound: std::collections::HashSet<String>,
+}
+
+impl PeerPinConfig {
+    pub fn parse(outbound: &str, inbound: &str, configured_peers: &[String]) -> Result<Self> {
+        let mut pins = std::collections::BTreeMap::new();
+        let mut unique_ids = std::collections::HashSet::new();
+        for entry in outbound.split(',') {
+            if entry.is_empty() || entry.trim() != entry {
+                bail!("ANA_PEER_PINS contains an empty or whitespace-padded entry");
+            }
+            let (endpoint, node_id) = entry.split_once('=')
+                .context("ANA_PEER_PINS entries must be endpoint=node-id")?;
+            if endpoint.is_empty() || endpoint.contains('=') || endpoint.chars().any(char::is_whitespace) {
+                bail!("ANA_PEER_PINS contains an invalid endpoint");
+            }
+            if !is_lower_hex_64(node_id) {
+                bail!("ANA_PEER_PINS node IDs must be 64 lowercase hexadecimal characters");
+            }
+            if pins.insert(endpoint.to_owned(), node_id.to_owned()).is_some() {
+                bail!("ANA_PEER_PINS contains a duplicate endpoint");
+            }
+            if !unique_ids.insert(node_id.to_owned()) {
+                bail!("ANA_PEER_PINS contains a duplicate node ID");
+            }
+        }
+        let configured: std::collections::HashSet<&str> =
+            configured_peers.iter().map(String::as_str).collect();
+        if configured.len() != configured_peers.len() {
+            bail!("configured outbound peer endpoints contain duplicates");
+        }
+        if pins.len() != configured.len() || pins.keys().any(|endpoint| !configured.contains(endpoint.as_str())) {
+            bail!("ANA_PEER_PINS must contain exactly one entry for every configured outbound peer and no unknown endpoints");
+        }
+
+        let mut allowed = std::collections::HashSet::new();
+        for node_id in inbound.split(',') {
+            if node_id.is_empty() || node_id.trim() != node_id || !is_lower_hex_64(node_id) {
+                bail!("ANA_PEER_ALLOWED_NODE_IDS contains an empty, padded, or malformed node ID");
+            }
+            if !allowed.insert(node_id.to_owned()) {
+                bail!("ANA_PEER_ALLOWED_NODE_IDS contains a duplicate node ID");
+            }
+        }
+        if allowed.is_empty() {
+            bail!("ANA_PEER_ALLOWED_NODE_IDS must not be empty");
+        }
+        Ok(Self { outbound: pins, inbound: allowed })
+    }
+
+    pub fn outbound_pin(&self, endpoint: &str) -> Result<&str> {
+        self.outbound.get(endpoint).map(String::as_str)
+            .context("configured outbound peer has no explicit ANA node-ID pin")
+    }
+
+    pub fn permits_inbound(&self, node_id: &str) -> bool {
+        self.inbound.contains(node_id)
+    }
+
+    pub fn inbound_ids(&self) -> &std::collections::HashSet<String> {
+        &self.inbound
+    }
+}
+
 fn is_lower_hex_64(value: &str) -> bool {
     value.len() == 64
         && value
@@ -229,6 +299,7 @@ pub fn accept_authenticated(
     mut tcp: std::net::TcpStream,
     config: Arc<ServerConfig>,
     network_name: &str,
+    allowed_node_ids: &std::collections::HashSet<String>,
 ) -> Result<rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>> {
     let mut connection = rustls::ServerConnection::new(config)
         .context("could not create ANA TLS server connection")?;
@@ -242,8 +313,11 @@ pub fn accept_authenticated(
     let peer = connection.peer_certificates()
         .and_then(|certificates| certificates.first())
         .context("ANA peer TLS client did not present a certificate")?;
-    verify_peer_identity(peer.as_ref(), network_name, None)
+    let identity = verify_peer_identity(peer.as_ref(), network_name, None)
         .context("ANA peer TLS client identity verification failed")?;
+    if !allowed_node_ids.contains(&identity.node_id) {
+        bail!("ANA peer TLS client node ID is not in the inbound allowlist");
+    }
     Ok(rustls::StreamOwned::new(connection, tcp))
 }
 
@@ -254,6 +328,7 @@ pub fn connect_authenticated(
     config: Arc<ClientConfig>,
     server_name: &str,
     network_name: &str,
+    expected_node_id: &str,
 ) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>> {
     let name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
         .context("invalid ANA peer TLS server name")?;
@@ -269,7 +344,7 @@ pub fn connect_authenticated(
     let peer = connection.peer_certificates()
         .and_then(|certificates| certificates.first())
         .context("ANA peer TLS server did not present a certificate")?;
-    verify_peer_identity(peer.as_ref(), network_name, None)
+    verify_peer_identity(peer.as_ref(), network_name, Some(expected_node_id))
         .context("ANA peer TLS server identity verification failed")?;
     Ok(rustls::StreamOwned::new(connection, tcp))
 }
@@ -303,6 +378,33 @@ mod tests {
             .expect("fixture certificate")
             .expect("valid PEM")
             .to_vec()
+    }
+
+    #[test]
+    fn peer_pin_configuration_is_strict_and_covers_exact_endpoints() {
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let peers = vec!["127.0.0.1:9001".to_owned(), "[::1]:9002".to_owned()];
+        let config = PeerPinConfig::parse(
+            &format!("127.0.0.1:9001={a},[::1]:9002={b}"), a, &peers
+        ).unwrap();
+        assert_eq!(config.outbound_pin("127.0.0.1:9001").unwrap(), a);
+        assert!(config.permits_inbound(a));
+        assert!(!config.permits_inbound(b));
+    }
+
+    #[test]
+    fn peer_pin_configuration_rejects_missing_unknown_duplicate_and_malformed_entries() {
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let peers = vec!["127.0.0.1:9001".to_owned()];
+        assert!(PeerPinConfig::parse("", a, &peers).is_err());
+        assert!(PeerPinConfig::parse(&format!("127.0.0.1:9002={a}"), a, &peers).is_err());
+        assert!(PeerPinConfig::parse(&format!("127.0.0.1:9001={a},127.0.0.1:9001={b}"), a, &peers).is_err());
+        assert!(PeerPinConfig::parse(&format!("127.0.0.1:9001={a}"), &format!("{a},{a}"), &peers).is_err());
+        assert!(PeerPinConfig::parse("127.0.0.1:9001=ABC", a, &peers).is_err());
+        assert!(PeerPinConfig::parse(&format!("127.0.0.1:9001={a},"), a, &peers).is_err());
+        assert!(PeerPinConfig::parse(&format!("127.0.0.1:9001={a}"), "", &peers).is_err());
     }
 
     #[test]

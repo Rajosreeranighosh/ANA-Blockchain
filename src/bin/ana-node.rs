@@ -478,7 +478,7 @@ fn handle(
     if let Some(tls) = PEER_TLS.get() {
         match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK) {
             Ok(secure_stream) => handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, active_connections, sync_sessions),
-            Err(error) => eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"),
+            Err(error) => { active_connections.fetch_sub(1, Ordering::SeqCst); eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"); },
         }
     } else {
         handle_transport(stream, peer_is_loopback, chain, peers, seen, pool, data_file, active_connections, sync_sessions);

@@ -1319,7 +1319,8 @@ mod network_security_tests {
         state.ledger.balances.insert(sender_address, 5 * COIN);
         let chain: SharedChain = Arc::new(Mutex::new(state));
         let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
-        let active = Arc::new(AtomicUsize::new(0));
+        // Model the listener accounting performed by the production accept loop.
+        let active = Arc::new(AtomicUsize::new(1));
         let data_file = std::env::temp_dir().join(format!("ana-mtls-transaction-{}.json", std::process::id()));
         let server_chain = chain.clone();
         let server_pool = pool.clone();

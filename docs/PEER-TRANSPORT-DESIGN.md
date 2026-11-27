@@ -19,7 +19,7 @@ The node enables this mode only when all seven variables are present:
 
 If none of these variables is set, the node remains in loopback-only plaintext compatibility mode. If only some are set, startup fails. There is no plaintext fallback after TLS mode is selected. The legacy shared peer token remains an optional application-layer check and is not treated as node identity.
 
-**Not yet complete:** final Windows/Ubuntu CI for the newest duplicate-connection integration, exhaustive expiry/CRL/ALPN/plaintext negative tests, a concurrent-handshake cap and bounded certificate-chain parsing budget, a multi-node block-and-transaction gossip test, certificate provisioning/rotation guidance, and independent security review. The duplicate-identity test covers the reservation lifecycle over real TLS sessions, but production connection-slot accounting and broader concurrency/resource-exhaustion behavior still require dedicated tests. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
+**Not yet complete:** final Windows/Ubuntu CI for the newest duplicate-connection integration, exhaustive expiry/CRL/ALPN/plaintext negative tests, a concurrent-handshake cap and bounded certificate-chain parsing budget, a multi-node block-and-transaction gossip test, certificate provisioning/rotation guidance, and independent security review. The duplicate-identity test covers the reservation lifecycle over real TLS sessions. An eight-slot inbound TLS-handshake cap is now implemented with an RAII guard and a test that verifies the ninth concurrent acquisition is rejected and a slot becomes available after release. Production connection-slot accounting and broader concurrency/resource-exhaustion behavior still require dedicated tests. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
 
 ## 1. Security goals
 
@@ -85,14 +85,14 @@ Define how revocation is distributed and how stale revocation data is handled. I
 
 Retain and test the existing maximum connection count, socket timeouts, and message-size limits. Add:
 
-- An absolute 10-second handshake deadline is implemented on inbound and outbound TLS handshakes; a cap on concurrent handshakes remains outstanding.
+- An absolute 10-second handshake deadline is implemented on inbound and outbound TLS handshakes. Inbound TLS handshakes are capped at eight concurrent attempts using an RAII slot guard; excess attempts are rejected, and a unit test verifies cap enforcement and slot release.
 - A bounded certificate-chain size and certificate parsing budget remain outstanding.
 - Per-peer and per-IP connection/request rate limits.
 - A duplicate-identity policy is implemented with a process-wide inbound identity reservation; a real TLS integration test verifies rejection while the first connection is live and acceptance after it closes.
 - Clean shutdown and deterministic release of connection slots after handshake failure, timeout, or I/O error.
 - Metrics that expose counts and error categories but never private key material, tokens, or sensitive payloads.
 
-TLS handshakes consume CPU and memory; the existing TCP connection cap alone is insufficient against handshake exhaustion.
+TLS handshakes consume CPU and memory; the existing TCP connection cap alone is insufficient against handshake exhaustion. The eight-slot inbound cap reduces concurrent handshake pressure but does not replace aggregate certificate-chain size limits, parser-work budgets, per-peer/IP rate limits, or adversarial load testing.
 
 ## 7. Required tests
 

@@ -122,6 +122,8 @@ fn chain_request(start: u64, sync_id: Option<String>) -> Message {
 }
 
 const MAX_CONNECTIONS: usize = 64;
+const MAX_CONCURRENT_TLS_HANDSHAKES: usize = 8;
+static ACTIVE_TLS_HANDSHAKES: AtomicUsize = AtomicUsize::new(0);
 const MAX_CONNECTIONS_PER_WINDOW: usize = 30;
 const CONNECTION_RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RATE_LIMIT_ENTRIES: usize = 256;
@@ -140,6 +142,26 @@ struct PeerTls {
 }
 static PEER_TLS: OnceLock<PeerTls> = OnceLock::new();
 static ACTIVE_AUTHENTICATED_PEERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+struct TlsHandshakeGuard;
+
+impl TlsHandshakeGuard {
+    fn try_acquire() -> Option<Self> {
+        let current = ACTIVE_TLS_HANDSHAKES.fetch_add(1, Ordering::SeqCst);
+        if current >= MAX_CONCURRENT_TLS_HANDSHAKES {
+            ACTIVE_TLS_HANDSHAKES.fetch_sub(1, Ordering::SeqCst);
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for TlsHandshakeGuard {
+    fn drop(&mut self) {
+        ACTIVE_TLS_HANDSHAKES.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 
 /// Reserves one authenticated certificate identity for the lifetime of its
 /// inbound connection. A duplicate node identity is rejected; Drop releases
@@ -518,6 +540,14 @@ fn handle(
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     if let Some(tls) = PEER_TLS.get() {
+        let _handshake_guard = match TlsHandshakeGuard::try_acquire() {
+            Some(guard) => guard,
+            None => {
+                active_connections.fetch_sub(1, Ordering::SeqCst);
+                eprintln!("Rejected ANA mTLS peer: concurrent TLS handshake limit reached");
+                return;
+            }
+        };
         match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK, tls.pins.inbound_ids()) {
             Ok(secure_stream) => {
                 let peer_certificate = secure_stream.conn.peer_certificates()

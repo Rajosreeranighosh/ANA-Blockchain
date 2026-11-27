@@ -1,5 +1,5 @@
 use ana_blockchain::{validate_address, Block, ChainState, Ledger, Transaction};
-use ana_blockchain::peer_tls::{accept_authenticated, connect_authenticated, load_client_config, load_server_config};
+use ana_blockchain::peer_tls::{accept_authenticated, connect_authenticated, load_client_config, load_server_config, PeerPinConfig};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -136,11 +136,12 @@ struct PeerTls {
     server: Arc<rustls::ServerConfig>,
     client: Arc<rustls::ClientConfig>,
     server_name: String,
+    pins: PeerPinConfig,
 }
 static PEER_TLS: OnceLock<PeerTls> = OnceLock::new();
 
-fn peer_tls_from_env() -> Result<Option<PeerTls>> {
-    const REQUIRED: [&str; 5] = ["ANA_PEER_CA", "ANA_PEER_CRL", "ANA_PEER_CERT", "ANA_PEER_KEY", "ANA_PEER_SERVER_NAME"];
+fn peer_tls_from_env(configured_peers: &[String]) -> Result<Option<PeerTls>> {
+    const REQUIRED: [&str; 7] = ["ANA_PEER_CA", "ANA_PEER_CRL", "ANA_PEER_CERT", "ANA_PEER_KEY", "ANA_PEER_SERVER_NAME", "ANA_PEER_PINS", "ANA_PEER_ALLOWED_NODE_IDS"];
     let supplied = REQUIRED.iter().filter(|name| env::var_os(name).is_some()).count();
     if supplied == 0 { return Ok(None); }
     if supplied != REQUIRED.len() { bail!("mTLS requires all five ANA_PEER_* credential variables"); }
@@ -149,10 +150,16 @@ fn peer_tls_from_env() -> Result<Option<PeerTls>> {
     let cert = path("ANA_PEER_CERT")?; let key = path("ANA_PEER_KEY")?;
     let server_name = env::var("ANA_PEER_SERVER_NAME")?;
     if server_name.trim().is_empty() { bail!("ANA_PEER_SERVER_NAME must not be empty"); }
+    let pins = PeerPinConfig::parse(
+        &env::var("ANA_PEER_PINS")?,
+        &env::var("ANA_PEER_ALLOWED_NODE_IDS")?,
+        configured_peers,
+    )?;
     Ok(Some(PeerTls {
         server: load_server_config(&ca, &crl, &cert, &key)?,
         client: load_client_config(&ca, &crl, &cert, &key)?,
         server_name,
+        pins,
     }))
 }
 
@@ -273,7 +280,7 @@ fn send(peer: &str, message: &Message) {
         if let Ok(mut wire) = authenticated_wire(message) {
             wire.push(b'\n');
             if let Some(tls) = tls {
-                match connect_authenticated(tcp, tls.client.clone(), &tls.server_name, ana_blockchain::NETWORK) {
+                match tls.pins.outbound_pin(peer).and_then(|pin| connect_authenticated(tcp, tls.client.clone(), &tls.server_name, ana_blockchain::NETWORK, pin)) {
                     Ok(mut stream) => { let _ = stream.write_all(&wire); }
                     Err(error) => eprintln!("Outbound ANA mTLS authentication failed: {error}"),
                 }
@@ -476,7 +483,7 @@ fn handle(
     let _ = stream.set_read_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(SOCKET_TIMEOUT_SECS)));
     if let Some(tls) = PEER_TLS.get() {
-        match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK) {
+        match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK, tls.pins.inbound_ids()) {
             Ok(secure_stream) => handle_transport(secure_stream, true, chain, peers, seen, pool, data_file, active_connections, sync_sessions),
             Err(error) => { active_connections.fetch_sub(1, Ordering::SeqCst); eprintln!("Rejected unauthenticated ANA mTLS peer: {error}"); },
         }
@@ -726,7 +733,7 @@ fn main() -> Result<()> {
         Some(args[3].clone())
     };
     let configured_peers: Vec<String> = args.iter().skip(4).cloned().collect();
-    let tls_config = peer_tls_from_env()?;
+    let tls_config = peer_tls_from_env(&configured_peers)?;
     let tls_enabled = tls_config.is_some();
     if let Some(config) = tls_config {
         PEER_TLS.set(config).map_err(|_| anyhow::anyhow!("ANA peer TLS configuration already initialized"))?;

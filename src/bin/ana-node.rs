@@ -168,6 +168,13 @@ impl Drop for PeerIdentityGuard {
     }
 }
 
+fn reserve_authenticated_peer_identity(certificate_der: &[u8]) -> Result<PeerIdentityGuard> {
+    let identity = ana_blockchain::peer_tls::verify_peer_identity(
+        certificate_der, ana_blockchain::NETWORK, None
+    ).context("authenticated peer certificate has an invalid ANA node identity")?;
+    PeerIdentityGuard::reserve(identity.node_id)
+}
+
 fn peer_tls_from_env(configured_peers: &[String]) -> Result<Option<PeerTls>> {
     const REQUIRED: [&str; 7] = ["ANA_PEER_CA", "ANA_PEER_CRL", "ANA_PEER_CERT", "ANA_PEER_KEY", "ANA_PEER_SERVER_NAME", "ANA_PEER_PINS", "ANA_PEER_ALLOWED_NODE_IDS"];
     let supplied = REQUIRED.iter().filter(|name| env::var_os(name).is_some()).count();
@@ -513,20 +520,11 @@ fn handle(
     if let Some(tls) = PEER_TLS.get() {
         match accept_authenticated(stream, tls.server.clone(), ana_blockchain::NETWORK, tls.pins.inbound_ids()) {
             Ok(secure_stream) => {
-                let identity = secure_stream.conn.peer_certificates()
-                    .and_then(|certificates| certificates.first())
-                    .and_then(|certificate| ana_blockchain::peer_tls::verify_peer_identity(
-                        certificate.as_ref(), ana_blockchain::NETWORK, None
-                    ).ok());
-                let identity = match identity {
-                    Some(value) => value,
-                    None => {
-                        active_connections.fetch_sub(1, Ordering::SeqCst);
-                        eprintln!("Rejected ANA mTLS peer without a valid authenticated node identity");
-                        return;
-                    }
-                };
-                let _identity_guard = match PeerIdentityGuard::reserve(identity.node_id) {
+                let peer_certificate = secure_stream.conn.peer_certificates()
+                    .and_then(|certificates| certificates.first());
+                let _identity_guard = match peer_certificate
+                    .ok_or_else(|| anyhow::anyhow!("authenticated peer did not expose its certificate"))
+                    .and_then(|certificate| reserve_authenticated_peer_identity(certificate.as_ref())) {
                     Ok(guard) => guard,
                     Err(error) => {
                         active_connections.fetch_sub(1, Ordering::SeqCst);
@@ -933,12 +931,15 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_node_identity_is_unique_until_connection_closes() {
-        let node_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-        let first = PeerIdentityGuard::reserve(node_id.to_owned()).unwrap();
-        assert!(PeerIdentityGuard::reserve(node_id.to_owned()).is_err());
+    fn authenticated_certificate_identity_is_unique_until_connection_closes() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests").join("fixtures").join("mtls-client.pem");
+        let certificate = rustls_pemfile::certs(&mut BufReader::new(fs::File::open(fixture).unwrap()))
+            .next().unwrap().unwrap();
+        let first = reserve_authenticated_peer_identity(certificate.as_ref()).unwrap();
+        assert!(reserve_authenticated_peer_identity(certificate.as_ref()).is_err());
         drop(first);
-        assert!(PeerIdentityGuard::reserve(node_id.to_owned()).is_ok());
+        assert!(reserve_authenticated_peer_identity(certificate.as_ref()).is_ok());
     }
 
     #[test]

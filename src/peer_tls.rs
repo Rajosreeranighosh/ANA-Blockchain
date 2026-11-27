@@ -776,6 +776,58 @@ mod tests {
     }
 
     #[test]
+    fn expired_client_certificate_is_rejected_by_webpki_verifier() {
+        use rustls::pki_types::UnixTime;
+
+        let roots = read_trust_roots(&test_fixture("mtls-ca.pem")).unwrap();
+        let crls = read_required_crls(&test_fixture("mtls-crl.pem")).unwrap();
+        let verifier = WebPkiClientVerifier::builder(roots)
+            .with_crls(crls)
+            .enforce_revocation_expiration()
+            .build()
+            .unwrap();
+        let certs = read_certificates(&test_fixture("mtls-client.pem"), "test client").unwrap();
+        let (_, parsed) = parse_x509_certificate(certs[0].as_ref()).unwrap();
+        let after_expiry = parsed.validity().not_after.timestamp() + 1;
+        let now = UnixTime::since_unix_epoch(
+            Duration::from_secs(u64::try_from(after_expiry).unwrap())
+        );
+
+        assert!(
+            rustls::server::ClientCertVerifier::verify_client_cert(
+                &verifier, &certs[0], &[], now
+            ).is_err(),
+            "an otherwise trusted client certificate must be rejected after notAfter"
+        );
+    }
+
+    #[test]
+    fn server_auth_only_certificate_is_rejected_as_a_client_identity() {
+        use rustls::pki_types::UnixTime;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let roots = read_trust_roots(&test_fixture("mtls-ca.pem")).unwrap();
+        let crls = read_required_crls(&test_fixture("mtls-crl.pem")).unwrap();
+        let verifier = WebPkiClientVerifier::builder(roots)
+            .with_crls(crls)
+            .enforce_revocation_expiration()
+            .build()
+            .unwrap();
+        // This CA-issued fixture is the server's identity, not a client identity.
+        // Its serverAuth EKU must not authorize it for mutual-TLS client auth.
+        let certs = read_certificates(&test_fixture("mtls-server.pem"), "test server").unwrap();
+        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = UnixTime::since_unix_epoch(elapsed);
+
+        assert!(
+            rustls::server::ClientCertVerifier::verify_client_cert(
+                &verifier, &certs[0], &[], now
+            ).is_err(),
+            "a serverAuth-only certificate must be rejected for client authentication"
+        );
+    }
+
+    #[test]
     fn missing_ca_configuration_fails_closed() {
         let missing = Path::new("this-file-must-not-exist-ana-ca.pem");
         assert!(read_trust_roots(missing).is_err());

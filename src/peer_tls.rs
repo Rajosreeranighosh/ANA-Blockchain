@@ -869,6 +869,21 @@ mod tests {
     }
 
     #[test]
+    fn tls_12_only_client_is_rejected_by_tls_13_only_peer_server() {
+        let roots = read_trust_roots(&test_fixture("mtls-ca.pem")).unwrap();
+        let certs = read_certificates(&test_fixture("mtls-client.pem"), "test client").unwrap();
+        let key = read_private_key(&test_fixture("mtls-client.key")).unwrap();
+        let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+            .with_root_certificates((*roots).clone())
+            .with_client_auth_cert(certs, key)
+            .unwrap();
+
+        // The shared handshake helper uses load_server_config(), which only
+        // advertises TLS 1.3. A TLS 1.2-only client must fail at negotiation.
+        assert_tls_handshake_rejected(Arc::new(config), "mtls-crl.pem");
+    }
+
+    #[test]
     fn alpn_identifier_is_the_peer_protocol() {
         assert_eq!(ALPN_PROTOCOL, b"ana-peer/1");
     }

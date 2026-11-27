@@ -1286,6 +1286,108 @@ mod network_security_tests {
     }
 
     #[test]
+    fn signed_transaction_is_accepted_by_node_over_mutual_tls() {
+        let fixture = |name: &str| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join(name)
+        };
+        let server_config = load_server_config(
+            &fixture("mtls-ca.pem"),
+            &fixture("mtls-crl.pem"),
+            &fixture("mtls-server.pem"),
+            &fixture("mtls-server.key"),
+        ).unwrap();
+        let client_config = load_client_config(
+            &fixture("mtls-ca.pem"),
+            &fixture("mtls-crl.pem"),
+            &fixture("mtls-client.pem"),
+            &fixture("mtls-client.key"),
+        ).unwrap();
+
+        let sender = SigningKey::generate(&mut OsRng);
+        let receiver = SigningKey::generate(&mut OsRng);
+        let sender_address = address(&sender.verifying_key());
+        let receiver_address = address(&receiver.verifying_key());
+        let tx = sign(&sender, receiver_address, COIN, 1, 0).unwrap();
+        let tx_id = tx.id().unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut state = ChainState::new();
+        state.ledger.balances.insert(sender_address, 5 * COIN);
+        let chain: SharedChain = Arc::new(Mutex::new(state));
+        let pool: Mempool = Arc::new(Mutex::new(BTreeMap::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let data_file = temp_file("mtls-transaction");
+        let server_chain = chain.clone();
+        let server_pool = pool.clone();
+        let server_active = active.clone();
+        let server_data = data_file.clone();
+
+        let server = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let stream = accept_authenticated(tcp, server_config, ana_blockchain::NETWORK).unwrap();
+            handle_transport(
+                stream,
+                true,
+                server_chain,
+                Arc::new(Vec::new()),
+                Arc::new(Mutex::new(SeenCache::default())),
+                server_pool,
+                server_data,
+                server_active,
+                Arc::new(Mutex::new(BTreeMap::new())),
+            );
+        });
+
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut stream = connect_authenticated(
+            tcp,
+            client_config,
+            "ana-peer.invalid",
+            ana_blockchain::NETWORK,
+        ).unwrap();
+        let request = Message {
+            kind: "transaction".into(),
+            transaction: Some(tx),
+            block: None,
+            blocks: None,
+            address: None,
+            balance: None,
+            nonce: None,
+            transaction_id: None,
+            transaction_state: None,
+            confirmed_height: None,
+            confirmations: None,
+            node_status: None,
+        };
+        let mut wire = authenticated_wire(&request).unwrap();
+        wire.push(b'\\n');
+        stream.write_all(&wire).unwrap();
+        let mut ack_line = Vec::new();
+        BufReader::new(&mut stream).read_until(b'\\n', &mut ack_line).unwrap();
+        let ack: AuthenticatedMessage = serde_json::from_slice(&ack_line).unwrap();
+        assert_eq!(ack.message.transaction_state.as_deref(), Some("accepted"));
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !pool.lock().unwrap().contains_key(&tx_id) {
+            assert!(Instant::now() < deadline, "mTLS node did not accept the signed transaction");
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(stream);
+        server.join().unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        let _ = fs::remove_file(&data_file);
+        let _ = fs::remove_file(mempool_path(&data_file));
+    }
+
+    #[test]
     fn node_status_is_served_over_a_real_tcp_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

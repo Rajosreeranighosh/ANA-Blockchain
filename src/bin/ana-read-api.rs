@@ -222,7 +222,12 @@ fn main() -> anyhow::Result<()> {
     }
     let node_address = env::var("ANA_NODE_ADDR")
         .map_err(|_| anyhow::anyhow!("ANA_NODE_ADDR must explicitly identify the local ANA node TCP address"))?;
-    let node = Arc::new(NodeClient::new(node_address));
+    let node_socket: SocketAddr = node_address.parse()
+        .map_err(|_| anyhow::anyhow!("ANA_NODE_ADDR must be a literal IP:port socket address"))?;
+    if !node_socket.ip().is_loopback() {
+        anyhow::bail!("refusing non-loopback ANA_NODE_ADDR; the node TCP protocol is not a public HTTP upstream");
+    }
+    let node = Arc::new(NodeClient::new(node_socket.to_string()));
     let allowed_origin = env::var("ANA_READ_API_CORS_ORIGIN").ok().filter(|value| !value.is_empty()).map(Arc::new);
     let listener = TcpListener::bind(bind)?;
     let active = Arc::new(AtomicUsize::new(0));

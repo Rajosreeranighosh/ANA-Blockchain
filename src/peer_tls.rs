@@ -794,7 +794,7 @@ mod tests {
         );
 
         assert!(
-            rustls::server::ClientCertVerifier::verify_client_cert(
+            rustls::server::danger::ClientCertVerifier::verify_client_cert(
                 &verifier, &certs[0], &[], now
             ).is_err(),
             "an otherwise trusted client certificate must be rejected after notAfter"
@@ -820,7 +820,7 @@ mod tests {
         let now = UnixTime::since_unix_epoch(elapsed);
 
         assert!(
-            rustls::server::ClientCertVerifier::verify_client_cert(
+            rustls::server::danger::ClientCertVerifier::verify_client_cert(
                 &verifier, &certs[0], &[], now
             ).is_err(),
             "a serverAuth-only certificate must be rejected for client authentication"

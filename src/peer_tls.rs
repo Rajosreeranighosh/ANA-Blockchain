@@ -222,6 +222,58 @@ pub fn load_client_config(
     Ok(Arc::new(config))
 }
 
+
+/// Complete a server-side TLS handshake, then enforce the ANA network identity
+/// and peer-protocol ALPN before exposing the stream to the message handler.
+pub fn accept_authenticated(
+    mut tcp: std::net::TcpStream,
+    config: Arc<ServerConfig>,
+    network_name: &str,
+) -> Result<rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>> {
+    let mut connection = rustls::ServerConnection::new(config)
+        .context("could not create ANA TLS server connection")?;
+    while connection.is_handshaking() {
+        connection.complete_io(&mut tcp)
+            .context("ANA peer TLS server handshake failed")?;
+    }
+    if connection.alpn_protocol() != Some(ALPN_PROTOCOL) {
+        bail!("ANA peer TLS connection negotiated an unexpected ALPN protocol");
+    }
+    let peer = connection.peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .context("ANA peer TLS client did not present a certificate")?;
+    verify_peer_identity(peer.as_ref(), network_name, None)
+        .context("ANA peer TLS client identity verification failed")?;
+    Ok(rustls::StreamOwned::new(connection, tcp))
+}
+
+/// Complete a client-side TLS handshake and authenticate the remote ANA node
+/// before any application-protocol bytes are sent.
+pub fn connect_authenticated(
+    mut tcp: std::net::TcpStream,
+    config: Arc<ClientConfig>,
+    server_name: &str,
+    network_name: &str,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>> {
+    let name = rustls::pki_types::ServerName::try_from(server_name.to_owned())
+        .context("invalid ANA peer TLS server name")?;
+    let mut connection = rustls::ClientConnection::new(config, name)
+        .context("could not create ANA TLS client connection")?;
+    while connection.is_handshaking() {
+        connection.complete_io(&mut tcp)
+            .context("ANA peer TLS client handshake failed")?;
+    }
+    if connection.alpn_protocol() != Some(ALPN_PROTOCOL) {
+        bail!("ANA peer TLS connection negotiated an unexpected ALPN protocol");
+    }
+    let peer = connection.peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .context("ANA peer TLS server did not present a certificate")?;
+    verify_peer_identity(peer.as_ref(), network_name, None)
+        .context("ANA peer TLS server identity verification failed")?;
+    Ok(rustls::StreamOwned::new(connection, tcp))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

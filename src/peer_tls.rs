@@ -447,7 +447,7 @@ mod tests {
         let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_root_certificates((*roots).clone())
             .with_no_client_auth();
-        assert_tls_handshake_rejected(Arc::new(config));
+        assert_tls_handshake_rejected(Arc::new(config), "mtls-crl.pem");
     }
 
     #[test]

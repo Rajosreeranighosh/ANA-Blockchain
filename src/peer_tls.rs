@@ -566,6 +566,82 @@ mod tests {
         assert_eq!(identity, server_identity);
     }
 
+    #[test]
+    fn live_mtls_enforces_outbound_pin_and_inbound_allowlist() {
+        use std::{
+            collections::HashSet,
+            net::{TcpListener, TcpStream},
+            thread,
+            time::Duration,
+        };
+
+        let ca = test_fixture("mtls-ca.pem");
+        let crl = test_fixture("mtls-crl.pem");
+        let server_cert = test_fixture("mtls-server.pem");
+        let server_key = test_fixture("mtls-server.key");
+        let client_cert = test_fixture("mtls-client.pem");
+        let client_key = test_fixture("mtls-client.key");
+        let server_identity = verify_peer_identity(
+            read_certificates(&server_cert, "test server").unwrap()[0].as_ref(),
+            "testnet",
+            None,
+        ).unwrap();
+        let client_identity = verify_peer_identity(
+            read_certificates(&client_cert, "test client").unwrap()[0].as_ref(),
+            "testnet",
+            None,
+        ).unwrap();
+        let server_config = load_server_config(&ca, &crl, &server_cert, &server_key).unwrap();
+        let client_config = load_client_config(&ca, &crl, &client_cert, &client_key).unwrap();
+
+        // The CA-valid server must still be rejected when its SPKI pin is wrong.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let allowed_client = HashSet::from([client_identity.node_id.clone()]);
+        let server_config_for_thread = server_config.clone();
+        let server_thread = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = tcp.set_write_timeout(Some(Duration::from_secs(5)));
+            accept_authenticated(tcp, server_config_for_thread, "testnet", &allowed_client).is_ok()
+        });
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert!(connect_authenticated(
+            tcp,
+            client_config.clone(),
+            "ana-peer.invalid",
+            "testnet",
+            &"f".repeat(64),
+        ).is_err());
+        assert!(server_thread.join().unwrap());
+
+        // A valid TLS client is rejected when its node ID is not allowlisted.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_config_for_thread = server_config.clone();
+        let server_thread = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let _ = tcp.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = tcp.set_write_timeout(Some(Duration::from_secs(5)));
+            accept_authenticated(tcp, server_config_for_thread, "testnet", &HashSet::new()).is_err()
+        });
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let client_result = connect_authenticated(
+            tcp,
+            client_config,
+            "ana-peer.invalid",
+            "testnet",
+            &server_identity.node_id,
+        );
+        assert!(client_result.is_ok(), "server identity should be valid; inbound authorization is checked by server");
+        drop(client_result);
+        assert!(server_thread.join().unwrap(), "server accepted a client outside its inbound allowlist");
+    }
+
     fn test_fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests")

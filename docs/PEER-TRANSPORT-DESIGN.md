@@ -1,6 +1,6 @@
 # ANA Peer Transport Design — mTLS 1.0 (Proposal)
 
-**Status:** partially implemented on `ana-mtls-transport-v1`; not yet CI-validated or approved for public deployment  
+**Status:** partially implemented on `ana-mtls-transport-v1`; Windows and Ubuntu CI passed on commit `e3b01b973b414534050701a5d0c31315b4168f88`; not approved for public deployment  
 **Scope:** replace the current plaintext TCP peer channel without changing consensus, transaction encoding, or chain-selection rules.
 
 ## Implementation status (2026-11-27)
@@ -19,7 +19,7 @@ The node enables this mode only when all seven variables are present:
 
 If none of these variables is set, the node remains in loopback-only plaintext compatibility mode. If only some are set, startup fails. There is no plaintext fallback after TLS mode is selected. The legacy shared peer token remains an optional application-layer check and is not treated as node identity.
 
-**Not yet complete:** final Windows/Ubuntu CI for the newest duplicate-connection integration, exhaustive expiry/CRL/ALPN/plaintext negative tests, a concurrent-handshake cap and bounded certificate-chain parsing budget, a multi-node block-and-transaction gossip test, certificate provisioning/rotation guidance, and independent security review. The duplicate-identity test covers the reservation lifecycle over real TLS sessions. An eight-slot inbound TLS-handshake cap is implemented with an RAII guard; a test verifies the ninth concurrent acquisition is rejected and a released slot becomes available. Accepted connections now also enforce a maximum of eight certificates and 256 KiB aggregate DER (64 KiB per certificate) before ANA identity parsing. These chain limits are post-handshake: rustls has already processed the TLS Certificate message, so they do not constitute a hard pre-handshake memory/parser-work bound. Connection-slot release is owned by an RAII guard across both TLS and plaintext handler paths, with a unit test for release. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
+**Remaining gaps:** the latest Windows and Ubuntu CI runs passed on the commit identified above. The implementation has an eight-slot inbound TLS-handshake cap, a 10-second handshake deadline, post-handshake certificate-chain size limits, duplicate inbound identity reservation, and an RAII connection-slot guard; focused tests cover these controls. However, the negative-test matrix is still incomplete: expired/not-yet-valid certificates, wrong EKU/key usage, expired or wrong-issuer CRLs, wrong ALPN, TLS below 1.3, and stalled-handshake behavior need explicit end-to-end coverage. A hard pre-handshake TLS Certificate-message memory/parser-work bound is also unresolved because rustls processes that message before ANA's post-handshake chain checks. Multi-node block-and-transaction gossip, full rotation/revocation rehearsal, and independent security review remain release gates. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
 
 Operator certificate issuance, deployment, rotation, and emergency revocation steps are drafted in [PEER-CERTIFICATE-OPERATIONS.md](PEER-CERTIFICATE-OPERATIONS.md). That runbook is not production-approved and does not authorize public networking.
 

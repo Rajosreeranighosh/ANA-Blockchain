@@ -931,15 +931,103 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_certificate_identity_is_unique_until_connection_closes() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests").join("fixtures").join("mtls-client.pem");
-        let certificate = rustls_pemfile::certs(&mut BufReader::new(fs::File::open(fixture).unwrap()))
-            .next().unwrap().unwrap();
-        let first = reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").unwrap();
-        assert!(reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").is_err());
-        drop(first);
-        assert!(reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").is_ok());
+    fn duplicate_simultaneous_mtls_connections_are_rejected_until_first_closes() {
+        use std::sync::mpsc;
+
+        let fixture = |name: &str| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests").join("fixtures").join(name)
+        };
+        let server_config = load_server_config(
+            &fixture("mtls-ca.pem"), &fixture("mtls-crl.pem"),
+            &fixture("mtls-server.pem"), &fixture("mtls-server.key"),
+        ).unwrap();
+        let client_config = load_client_config(
+            &fixture("mtls-ca.pem"), &fixture("mtls-crl.pem"),
+            &fixture("mtls-client.pem"), &fixture("mtls-client.key"),
+        ).unwrap();
+        let server_node_id = fixture_node_id(&fixture("mtls-server.pem"));
+        let client_node_id = fixture_node_id(&fixture("mtls-client.pem"));
+        let allowed_node_ids = HashSet::from([client_node_id]);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let (first_ready_tx, first_ready_rx) = mpsc::channel();
+        let (duplicate_tx, duplicate_rx) = mpsc::channel();
+        let (released_tx, released_rx) = mpsc::channel();
+        let (third_accepted_tx, third_accepted_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (first_tcp, _) = listener.accept().unwrap();
+            first_tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            first_tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let first_stream = accept_authenticated(
+                first_tcp, server_config.clone(), "testnet", &allowed_node_ids
+            ).unwrap();
+            let first_certificate = first_stream.conn.peer_certificates().unwrap()[0].clone();
+            let first_guard = reserve_authenticated_peer_identity(
+                first_certificate.as_ref(), "testnet"
+            ).unwrap();
+            let holder = thread::spawn(move || {
+                let mut stream = first_stream;
+                let mut byte = [0u8; 1];
+                let _ = stream.read(&mut byte);
+                drop(first_guard);
+            });
+            first_ready_tx.send(()).unwrap();
+
+            let (second_tcp, _) = listener.accept().unwrap();
+            second_tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            second_tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let second_stream = accept_authenticated(
+                second_tcp, server_config.clone(), "testnet", &allowed_node_ids
+            ).unwrap();
+            let second_certificate = second_stream.conn.peer_certificates().unwrap()[0].clone();
+            let duplicate_rejected = reserve_authenticated_peer_identity(
+                second_certificate.as_ref(), "testnet"
+            ).is_err();
+            drop(second_stream);
+            duplicate_tx.send(duplicate_rejected).unwrap();
+
+            holder.join().unwrap();
+            released_tx.send(()).unwrap();
+
+            let (third_tcp, _) = listener.accept().unwrap();
+            third_tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            third_tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let third_stream = accept_authenticated(
+                third_tcp, server_config, "testnet", &allowed_node_ids
+            ).unwrap();
+            let third_certificate = third_stream.conn.peer_certificates().unwrap()[0].clone();
+            let third_guard = reserve_authenticated_peer_identity(
+                third_certificate.as_ref(), "testnet"
+            );
+            third_accepted_tx.send(third_guard.is_ok()).unwrap();
+            drop(third_guard);
+            drop(third_stream);
+        });
+
+        let connect_client = || {
+            let tcp = TcpStream::connect(address).unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            connect_authenticated(
+                tcp, client_config.clone(), "ana-peer.invalid", "testnet", &server_node_id
+            ).unwrap()
+        };
+
+        let first_client = connect_client();
+        first_ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second_client = connect_client();
+        assert!(duplicate_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        drop(second_client);
+        drop(first_client);
+        released_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let third_client = connect_client();
+        assert!(third_accepted_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        drop(third_client);
+        server.join().unwrap();
     }
 
     #[test]

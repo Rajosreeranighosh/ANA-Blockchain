@@ -5,19 +5,21 @@
 
 ## Implementation status (2026-11-27)
 
-The feature branch now contains TLS 1.3 client/server configuration, CA and CRL loading, ANA URI-SAN identity checks, ALPN enforcement, test-only mutual-TLS handshake fixtures, and an initial live-node integration. When all credentials are configured, inbound and outbound peer streams complete mutual TLS and verify the peer's ANA network identity before application messages are processed. The existing newline-delimited JSON framing is preserved.
+The feature branch now contains TLS 1.3 client/server configuration, CA and CRL loading, ANA URI-SAN and SPKI identity checks, ALPN enforcement, strict outbound pins and inbound allowlists, test-only mutual-TLS fixtures, and a live-node transaction integration. The TLS handshake has an absolute 10-second deadline on both client and server paths. A duplicate authenticated inbound node ID is rejected while its first connection remains active; a real two-connection TLS integration test exercises rejection and identity release. The existing newline-delimited JSON framing is preserved.
 
-The node enables this mode only when all five variables are present:
+The node enables this mode only when all seven variables are present:
 
 - `ANA_PEER_CA`: PEM network CA bundle.
 - `ANA_PEER_CRL`: PEM CRL bundle; required and fail-closed.
 - `ANA_PEER_CERT`: this node's PEM certificate chain.
 - `ANA_PEER_KEY`: this node's private key (keep outside the repository and protect filesystem permissions).
 - `ANA_PEER_SERVER_NAME`: DNS name used for TLS server-name validation; the remote server certificate must contain the matching DNS SAN.
+- `ANA_PEER_PINS`: exact `endpoint=node-id` mapping for every configured outbound peer.
+- `ANA_PEER_ALLOWED_NODE_IDS`: explicit inbound allowlist of lowercase 64-character SPKI fingerprints.
 
 If none of these variables is set, the node remains in loopback-only plaintext compatibility mode. If only some are set, startup fails. There is no plaintext fallback after TLS mode is selected. The legacy shared peer token remains an optional application-layer check and is not treated as node identity.
 
-**Not yet complete:** cross-platform CI for the live integration, exhaustive expiry/CRL/ALPN/plaintext negative tests, a multi-node block-and-transaction gossip test, certificate provisioning/rotation guidance, and independent security review. The current transport identity verifier checks the ANA network URI SAN and its SPKI-derived node ID; explicit per-peer node pinning and operational duplicate-identity policy still need design and tests. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
+**Not yet complete:** final Windows/Ubuntu CI for the newest duplicate-connection integration, exhaustive expiry/CRL/ALPN/plaintext negative tests, a concurrent-handshake cap and bounded certificate-chain parsing budget, a multi-node block-and-transaction gossip test, certificate provisioning/rotation guidance, and independent security review. The duplicate-identity test covers the reservation lifecycle over real TLS sessions, but production connection-slot accounting and broader concurrency/resource-exhaustion behavior still require dedicated tests. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
 
 ## 1. Security goals
 
@@ -83,10 +85,10 @@ Define how revocation is distributed and how stale revocation data is handled. I
 
 Retain and test the existing maximum connection count, socket timeouts, and message-size limits. Add:
 
-- A handshake deadline and a cap on concurrent handshakes.
-- A bounded certificate-chain size and certificate parsing budget.
+- An absolute 10-second handshake deadline is implemented on inbound and outbound TLS handshakes; a cap on concurrent handshakes remains outstanding.
+- A bounded certificate-chain size and certificate parsing budget remain outstanding.
 - Per-peer and per-IP connection/request rate limits.
-- A policy for duplicate connections from the same authenticated node identity.
+- A duplicate-identity policy is implemented with a process-wide inbound identity reservation; a real TLS integration test verifies rejection while the first connection is live and acceptance after it closes.
 - Clean shutdown and deterministic release of connection slots after handshake failure, timeout, or I/O error.
 - Metrics that expose counts and error categories but never private key material, tokens, or sensitive payloads.
 
@@ -197,8 +199,8 @@ The operator configuration contract for the implementation is:
 - Empty entries, whitespace-padded entries, duplicate endpoints, duplicate node IDs, malformed fingerprints, and unrecognized endpoints are configuration errors. No wildcard, implicit trust, or default allow-all behavior is permitted.
 - When mTLS is enabled, both variables are required. Every configured outbound endpoint must have exactly one pin. Inbound authentication must match the explicit allowlist.
 - The endpoint mapping is an operator-managed address-to-identity association, not a cryptographic identity itself. DNS/IP changes require updating the endpoint entry without changing the certificate identity.
-- The same node ID must not be admitted through multiple simultaneous inbound connections. The implementation must reserve identity only after successful TLS and pin verification and release it on every connection exit path.
-- These variables are not active until the code parses and validates them at startup and the live handshake path enforces them. Until then, do not deploy mTLS on public interfaces.
+- The same node ID must not be admitted through multiple simultaneous inbound connections. The current inbound path reserves identity only after successful TLS, network-identity, and allowlist verification; the guard releases it when the connection handler exits. A real TLS integration test verifies duplicate rejection and subsequent reuse after the first session closes.
+- These variables are parsed and validated at startup and enforced by the live outbound/inbound handshake paths. Do not deploy mTLS on public interfaces until all remaining rollout gates are satisfied.
 
 This configuration is intentionally explicit and fail-closed. Do not silently derive expected node IDs from the presented certificate, since that would make pinning meaningless.
 

@@ -1327,6 +1327,17 @@ mod network_security_tests {
     }
 
     #[test]
+    fn tls_handshake_guard_enforces_limit_and_releases_slots() {
+        let guards: Vec<_> = (0..MAX_CONCURRENT_TLS_HANDSHAKES)
+            .map(|_| TlsHandshakeGuard::try_acquire().expect("slot should be available"))
+            .collect();
+        assert!(TlsHandshakeGuard::try_acquire().is_none());
+        drop(guards);
+        let guard = TlsHandshakeGuard::try_acquire().expect("released slot should be reusable");
+        drop(guard);
+    }
+
+    #[test]
     fn message_size_limit_is_nonzero_and_bounded() {
         assert!(MAX_MESSAGE_BYTES >= 1024);
         assert!(MAX_MESSAGE_BYTES <= 8 * 1024 * 1024);

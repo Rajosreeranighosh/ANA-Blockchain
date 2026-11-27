@@ -1,7 +1,23 @@
 # ANA Peer Transport Design — mTLS 1.0 (Proposal)
 
-**Status:** design only; not implemented or approved for public deployment  
+**Status:** partially implemented on `ana-mtls-transport-v1`; not yet CI-validated or approved for public deployment  
 **Scope:** replace the current plaintext TCP peer channel without changing consensus, transaction encoding, or chain-selection rules.
+
+## Implementation status (2026-11-27)
+
+The feature branch now contains TLS 1.3 client/server configuration, CA and CRL loading, ANA URI-SAN identity checks, ALPN enforcement, test-only mutual-TLS handshake fixtures, and an initial live-node integration. When all credentials are configured, inbound and outbound peer streams complete mutual TLS and verify the peer's ANA network identity before application messages are processed. The existing newline-delimited JSON framing is preserved.
+
+The node enables this mode only when all five variables are present:
+
+- `ANA_PEER_CA`: PEM network CA bundle.
+- `ANA_PEER_CRL`: PEM CRL bundle; required and fail-closed.
+- `ANA_PEER_CERT`: this node's PEM certificate chain.
+- `ANA_PEER_KEY`: this node's private key (keep outside the repository and protect filesystem permissions).
+- `ANA_PEER_SERVER_NAME`: DNS name used for TLS server-name validation; the remote server certificate must contain the matching DNS SAN.
+
+If none of these variables is set, the node remains in loopback-only plaintext compatibility mode. If only some are set, startup fails. There is no plaintext fallback after TLS mode is selected. The legacy shared peer token remains an optional application-layer check and is not treated as node identity.
+
+**Not yet complete:** cross-platform CI for the live integration, exhaustive expiry/CRL/ALPN/plaintext negative tests, a multi-node block-and-transaction gossip test, certificate provisioning/rotation guidance, and independent security review. The current transport identity verifier checks the ANA network URI SAN and its SPKI-derived node ID; explicit per-peer node pinning and operational duplicate-identity policy still need design and tests. Do not expose public peer listeners or treat this branch as production-secure until all rollout gates below pass.
 
 ## 1. Security goals
 

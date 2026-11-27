@@ -381,6 +381,75 @@ mod tests {
         assert_eq!(identity, server_identity);
     }
 
+    fn test_fixture(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn assert_tls_handshake_rejected(client_config: Arc<ClientConfig>) {
+        use std::{
+            io::{Read, Write},
+            net::{TcpListener, TcpStream},
+            thread,
+            time::Duration,
+        };
+        use rustls::{pki_types::ServerName, ClientConnection, ServerConnection, StreamOwned};
+
+        let server_config = load_server_config(
+            &test_fixture("mtls-ca.pem"),
+            &test_fixture("mtls-crl.pem"),
+            &test_fixture("mtls-server.pem"),
+            &test_fixture("mtls-server.key"),
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_thread = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let connection = ServerConnection::new(server_config).unwrap();
+            let mut tls = StreamOwned::new(connection, tcp);
+            let mut byte = [0u8; 1];
+            tls.read_exact(&mut byte).is_err()
+        });
+
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let server_name = ServerName::try_from("ana-peer.invalid").unwrap().to_owned();
+        let connection = ClientConnection::new(client_config, server_name).unwrap();
+        let mut tls = StreamOwned::new(connection, tcp);
+        let write_failed = tls.write_all(b"x").is_err();
+        let mut byte = [0u8; 1];
+        let read_failed = tls.read_exact(&mut byte).is_err();
+        assert!(write_failed || read_failed, "client unexpectedly completed TLS handshake");
+        assert!(server_thread.join().unwrap(), "server unexpectedly accepted unauthenticated peer");
+    }
+
+    #[test]
+    fn unknown_ca_is_rejected_during_tls_handshake() {
+        let roots = read_trust_roots(&test_fixture("mtls-wrong-ca.pem")).unwrap();
+        let certs = read_certificates(&test_fixture("mtls-client.pem"), "test client").unwrap();
+        let key = read_private_key(&test_fixture("mtls-client.key")).unwrap();
+        let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates((*roots).clone())
+            .with_client_auth_cert(certs, key)
+            .unwrap();
+        assert_tls_handshake_rejected(Arc::new(config));
+    }
+
+    #[test]
+    fn missing_client_certificate_is_rejected_during_tls_handshake() {
+        let roots = read_trust_roots(&test_fixture("mtls-ca.pem")).unwrap();
+        let config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates((*roots).clone())
+            .with_no_client_auth();
+        assert_tls_handshake_rejected(Arc::new(config));
+    }
+
     #[test]
     fn missing_ca_configuration_fails_closed() {
         let missing = Path::new("this-file-must-not-exist-ana-ca.pem");

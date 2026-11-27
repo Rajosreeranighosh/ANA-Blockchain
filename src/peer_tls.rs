@@ -69,13 +69,19 @@ pub fn verify_peer_identity(
         .subject_alternative_name()
         .context("peer certificate has an invalid or duplicate SAN extension")?
         .context("peer certificate is missing its SAN extension")?;
-    if san.value.general_names.len() != 1 {
-        bail!("peer certificate must contain exactly one SAN entry");
+    let uri_names: Vec<&str> = san
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            GeneralName::URI(uri) => Some(*uri),
+            _ => None,
+        })
+        .collect();
+    if uri_names.len() != 1 {
+        bail!("peer certificate must contain exactly one URI SAN identity");
     }
-    let uri = match &san.value.general_names[0] {
-        GeneralName::URI(uri) => *uri,
-        _ => bail!("peer certificate SAN must contain exactly one URI identity"),
-    };
+    let uri = uri_names[0];
 
     let value = uri
         .strip_prefix("ana://")
@@ -299,6 +305,80 @@ mod tests {
         assert!(verify_peer_identity(b"not a certificate", "testnet", None).is_err());
         assert!(network_id("").is_err());
         assert!(network_id("bad\0network").is_err());
+    }
+
+    #[test]
+    fn ca_issued_nodes_complete_mutual_tls_and_exchange_framed_data() {
+        use std::{
+            io::{Read, Write},
+            net::{TcpListener, TcpStream},
+            thread,
+        };
+        use rustls::{pki_types::ServerName, ClientConnection, ServerConnection, StreamOwned};
+
+        let fixture = |name: &str| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join(name)
+        };
+        let ca = fixture("mtls-ca.pem");
+        let crl = fixture("mtls-crl.pem");
+        let server_cert = fixture("mtls-server.pem");
+        let server_key = fixture("mtls-server.key");
+        let client_cert = fixture("mtls-client.pem");
+        let client_key = fixture("mtls-client.key");
+
+        let server_identity = {
+            let cert = read_certificates(&server_cert, "test server").unwrap();
+            verify_peer_identity(cert[0].as_ref(), "testnet", None).unwrap()
+        };
+        let client_identity = {
+            let cert = read_certificates(&client_cert, "test client").unwrap();
+            verify_peer_identity(cert[0].as_ref(), "testnet", None).unwrap()
+        };
+
+        let server_config =
+            load_server_config(&ca, &crl, &server_cert, &server_key).unwrap();
+        let client_config =
+            load_client_config(&ca, &crl, &client_cert, &client_key).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_expected = client_identity.node_id.clone();
+        let server_thread = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            tcp.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let connection = ServerConnection::new(server_config).unwrap();
+            let mut tls = StreamOwned::new(connection, tcp);
+            let mut request = [0u8; 5];
+            tls.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"hello");
+            let peer = tls.conn.peer_certificates().unwrap()[0].as_ref().to_vec();
+            let identity =
+                verify_peer_identity(&peer, "testnet", Some(&server_expected)).unwrap();
+            assert_eq!(tls.conn.alpn_protocol(), Some(ALPN_PROTOCOL));
+            tls.write_all(b"world").unwrap();
+            identity
+        });
+
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let server_name = ServerName::try_from("ana-peer.invalid").unwrap().to_owned();
+        let connection = ClientConnection::new(client_config, server_name).unwrap();
+        let mut tls = StreamOwned::new(connection, tcp);
+        tls.write_all(b"hello").unwrap();
+        let mut response = [0u8; 5];
+        tls.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"world");
+        let peer = tls.conn.peer_certificates().unwrap()[0].as_ref().to_vec();
+        let identity = verify_peer_identity(&peer, "testnet", Some(&server_identity.node_id)).unwrap();
+        assert_eq!(tls.conn.alpn_protocol(), Some(ALPN_PROTOCOL));
+
+        assert_eq!(server_thread.join().unwrap(), client_identity);
+        assert_eq!(identity, server_identity);
     }
 
     #[test]

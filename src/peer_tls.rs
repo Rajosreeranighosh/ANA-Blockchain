@@ -832,6 +832,38 @@ mod tests {
     }
 
     #[test]
+    fn client_certificate_with_key_encipherment_only_is_rejected() {
+        use rustls::pki_types::UnixTime;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // This leaf is signed by a dedicated test CA and has clientAuth EKU,
+        // but its Key Usage is keyEncipherment only (no digitalSignature).
+        // TLS client authentication must reject this incompatible key usage.
+        let roots = read_trust_roots(&test_fixture("peer-ku-test-ca.pem")).unwrap();
+        let verifier = WebPkiClientVerifier::builder(roots).build().unwrap();
+        let certs = read_certificates(
+            &test_fixture("peer-key-encipherment-only.pem"),
+            "keyEncipherment-only test certificate",
+        )
+        .unwrap();
+        let (_, parsed) = parse_x509_certificate(certs[0].as_ref()).unwrap();
+        let key_usage = parsed.key_usage().unwrap().unwrap();
+        assert!(key_usage.value.key_encipherment());
+        assert!(!key_usage.value.digital_signature());
+        let eku = parsed.extended_key_usage().unwrap().unwrap();
+        assert!(eku.value.client_auth);
+
+        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = UnixTime::since_unix_epoch(elapsed);
+        assert!(
+            rustls::server::danger::ClientCertVerifier::verify_client_cert(
+                verifier.as_ref(), &certs[0], &[], now
+            ).is_err(),
+            "a client certificate without digitalSignature Key Usage must be rejected"
+        );
+    }
+
+    #[test]
     fn missing_ca_configuration_fails_closed() {
         let missing = Path::new("this-file-must-not-exist-ana-ca.pem");
         assert!(read_trust_roots(missing).is_err());

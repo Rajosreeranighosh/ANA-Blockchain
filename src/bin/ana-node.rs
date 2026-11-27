@@ -1292,6 +1292,15 @@ mod network_security_tests {
         let _ = fs::remove_file(mempool_path(&std::env::temp_dir().join(format!("ana-two-node-b-{}.json", std::process::id()))));
     }
 
+    fn fixture_node_id(path: &Path) -> String {
+        let file = fs::File::open(path).unwrap();
+        let certificate = rustls_pemfile::certs(&mut BufReader::new(file))
+            .next().unwrap().unwrap();
+        ana_blockchain::peer_tls::verify_peer_identity(
+            certificate.as_ref(), "testnet", None
+        ).unwrap().node_id
+    }
+
     #[test]
     fn signed_transaction_is_accepted_by_node_over_mutual_tls() {
         let fixture = |name: &str| {
@@ -1334,11 +1343,14 @@ mod network_security_tests {
         let server_active = active.clone();
         let server_data = data_file.clone();
 
+        let client_node_id = fixture_node_id(&fixture("mtls-client.pem"));
+        let server_node_id = fixture_node_id(&fixture("mtls-server.pem"));
+        let allowed_node_ids = HashSet::from([client_node_id]);
         let server = thread::spawn(move || {
             let (tcp, _) = listener.accept().unwrap();
             tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-            let stream = accept_authenticated(tcp, server_config, "testnet").unwrap();
+            let stream = accept_authenticated(tcp, server_config, "testnet", &allowed_node_ids).unwrap();
             handle_transport(
                 stream,
                 true,
@@ -1360,6 +1372,7 @@ mod network_security_tests {
             client_config,
             "ana-peer.invalid",
             "testnet",
+            &server_node_id,
         ).unwrap();
         let request = Message {
             kind: "transaction".into(),

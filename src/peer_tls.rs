@@ -25,6 +25,31 @@ use x509_parser::prelude::{parse_x509_certificate, GeneralName};
 const ALPN_PROTOCOL: &[u8] = b"ana-peer/1";
 /// Maximum DER size accepted for a single ANA peer end-entity certificate.
 const MAX_PEER_CERTIFICATE_DER_BYTES: usize = 64 * 1024;
+/// Post-handshake policy bounds for the authenticated peer certificate chain.
+/// rustls still parses the TLS Certificate message during the handshake; these
+/// limits constrain accepted chains before ANA's identity parser/application.
+const MAX_PEER_CERTIFICATES: usize = 8;
+const MAX_PEER_CERTIFICATE_CHAIN_DER_BYTES: usize = 256 * 1024;
+
+fn validate_peer_certificate_chain(certificates: &[CertificateDer<'_>]) -> Result<()> {
+    if certificates.is_empty() {
+        bail!("ANA peer certificate chain is empty");
+    }
+    if certificates.len() > MAX_PEER_CERTIFICATES {
+        bail!("ANA peer certificate chain exceeds the certificate-count limit");
+    }
+    let total = certificates.iter().try_fold(0usize, |sum, certificate| {
+        if certificate.len() > MAX_PEER_CERTIFICATE_DER_BYTES {
+            bail!("ANA peer certificate exceeds the 64 KiB DER size limit");
+        }
+        sum.checked_add(certificate.len())
+            .context("ANA peer certificate chain size overflow")
+    })?;
+    if total > MAX_PEER_CERTIFICATE_CHAIN_DER_BYTES {
+        bail!("ANA peer certificate chain exceeds the 256 KiB aggregate DER limit");
+    }
+    Ok(())
+}
 
 /// Authenticated identity extracted from a certificate that rustls has already
 /// accepted under the configured CA, validity, EKU, key-usage, and CRL policy.
@@ -325,9 +350,10 @@ pub fn accept_authenticated(
     if connection.alpn_protocol() != Some(ALPN_PROTOCOL) {
         bail!("ANA peer TLS connection negotiated an unexpected ALPN protocol");
     }
-    let peer = connection.peer_certificates()
-        .and_then(|certificates| certificates.first())
+    let certificates = connection.peer_certificates()
         .context("ANA peer TLS client did not present a certificate")?;
+    validate_peer_certificate_chain(certificates)?;
+    let peer = certificates.first().context("ANA peer TLS client certificate chain is empty")?;
     let identity = verify_peer_identity(peer.as_ref(), network_name, None)
         .context("ANA peer TLS client identity verification failed")?;
     if !allowed_node_ids.contains(&identity.node_id) {
@@ -365,9 +391,10 @@ pub fn connect_authenticated(
     if connection.alpn_protocol() != Some(ALPN_PROTOCOL) {
         bail!("ANA peer TLS connection negotiated an unexpected ALPN protocol");
     }
-    let peer = connection.peer_certificates()
-        .and_then(|certificates| certificates.first())
+    let certificates = connection.peer_certificates()
         .context("ANA peer TLS server did not present a certificate")?;
+    validate_peer_certificate_chain(certificates)?;
+    let peer = certificates.first().context("ANA peer TLS server certificate chain is empty")?;
     verify_peer_identity(peer.as_ref(), network_name, Some(expected_node_id))
         .context("ANA peer TLS server identity verification failed")?;
     Ok(rustls::StreamOwned::new(connection, tcp))
@@ -476,6 +503,31 @@ mod tests {
     #[test]
     fn duplicate_san_extension_is_rejected() {
         assert!(verify_peer_identity(&fixture_certificate("duplicate-san"), "testnet", None).is_err());
+    }
+
+    #[test]
+    fn peer_certificate_chain_limits_are_enforced() {
+        use rustls::pki_types::CertificateDer;
+        assert!(validate_peer_certificate_chain(&[]).is_err());
+        let too_many: Vec<_> = (0..=MAX_PEER_CERTIFICATES)
+            .map(|_| CertificateDer::from(vec![1u8; 1]))
+            .collect();
+        assert!(validate_peer_certificate_chain(&too_many).is_err());
+        let oversized = vec![CertificateDer::from(vec![1u8; MAX_PEER_CERTIFICATE_DER_BYTES + 1])];
+        assert!(validate_peer_certificate_chain(&oversized).is_err());
+        let aggregate = vec![
+            CertificateDer::from(vec![1u8; 64 * 1024]),
+            CertificateDer::from(vec![2u8; 64 * 1024]),
+            CertificateDer::from(vec![3u8; 64 * 1024]),
+            CertificateDer::from(vec![4u8; 64 * 1024]),
+            CertificateDer::from(vec![5u8; 1]),
+        ];
+        assert!(validate_peer_certificate_chain(&aggregate).is_err());
+        let valid = vec![
+            CertificateDer::from(vec![1u8; 1024]),
+            CertificateDer::from(vec![2u8; 1024]),
+        ];
+        assert!(validate_peer_certificate_chain(&valid).is_ok());
     }
 
     #[test]

@@ -19,10 +19,16 @@ qrcode = { version = "0.14", default-features = false }
 rand = "0.8"
 rpassword = "7"
 randomx-rs = "1.6.0"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "=2.2.0"
+x509-parser = "=0.17.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
 zeroize = "1"
 
 [dev-dependencies]
-tempfile = "3"
+# Enable TLS 1.2 only in test builds so we can prove the production TLS 1.3
+# listener rejects legacy protocol negotiation without enabling TLS 1.2 in releases.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }

@@ -939,7 +939,7 @@ mod tests {
         let first = reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").unwrap();
         assert!(reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").is_err());
         drop(first);
-        assert!(reserve_authenticated_peer_identity(certificate.as_ref()).is_ok());
+        assert!(reserve_authenticated_peer_identity(certificate.as_ref(), "testnet").is_ok());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! The upstream node protocol is plaintext TCP and must remain on a trusted
 //! loopback/private network. Never bind this process to a public interface.
 
-use ana_blockchain::{rpc::NodeClient, NETWORK};
+use ana_blockchain::{rpc::NodeClient, validate_address, NETWORK};
 use serde::Serialize;
 use std::{
     env,
@@ -169,14 +169,20 @@ fn handle(mut stream: TcpStream, node: Arc<NodeClient>, allowed_origin: Option<A
     }
 
     if let Some(address) = path.strip_prefix("/api/v1/accounts/") {
+        if validate_address(address).is_err() {
+            let _ = send_json(&mut stream, "400 Bad Request", &ApiError {
+                schema_version: "1", network: NETWORK, error: "invalid_address"
+            }, origin_ref, allowed);
+            return;
+        }
         match node.account(address) {
             Ok((balance, nonce)) => {
                 let value = AccountResponse { schema_version: "1", network: NETWORK, address, balance, nonce };
                 let _ = send_json(&mut stream, "200 OK", &value, origin_ref, allowed);
             }
             Err(_) => {
-                let _ = send_json(&mut stream, "400 Bad Request", &ApiError {
-                    schema_version: "1", network: NETWORK, error: "invalid_address_or_upstream_error"
+                let _ = send_json(&mut stream, "502 Bad Gateway", &ApiError {
+                    schema_version: "1", network: NETWORK, error: "upstream_unavailable_or_invalid"
                 }, origin_ref, allowed);
             }
         }

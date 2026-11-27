@@ -788,6 +788,29 @@ mod tests {
     }
 
     #[test]
+    fn configured_tls_roles_advertise_the_ana_peer_alpn() {
+        let ca = test_fixture("mtls-ca.pem");
+        let crl = test_fixture("mtls-crl.pem");
+        let server = load_server_config(
+            &ca,
+            &crl,
+            &test_fixture("mtls-server.pem"),
+            &test_fixture("mtls-server.key"),
+        )
+        .unwrap();
+        let client = load_client_config(
+            &ca,
+            &crl,
+            &test_fixture("mtls-client.pem"),
+            &test_fixture("mtls-client.key"),
+        )
+        .unwrap();
+
+        assert_eq!(server.alpn_protocols, vec![ALPN_PROTOCOL.to_vec()]);
+        assert_eq!(client.alpn_protocols, vec![ALPN_PROTOCOL.to_vec()]);
+    }
+
+    #[test]
     fn alpn_identifier_is_the_peer_protocol() {
         assert_eq!(ALPN_PROTOCOL, b"ana-peer/1");
     }

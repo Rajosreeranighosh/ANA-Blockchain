@@ -811,6 +811,64 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_alpn_is_rejected_by_both_peer_transport_endpoints() {
+        use std::{
+            collections::HashSet,
+            net::{TcpListener, TcpStream},
+            thread,
+            time::Duration,
+        };
+
+        let ca = test_fixture("mtls-ca.pem");
+        let crl = test_fixture("mtls-crl.pem");
+        let server_cert = test_fixture("mtls-server.pem");
+        let server_key = test_fixture("mtls-server.key");
+        let client_cert = test_fixture("mtls-client.pem");
+        let client_key = test_fixture("mtls-client.key");
+
+        let server_identity = verify_peer_identity(
+            read_certificates(&server_cert, "test server").unwrap()[0].as_ref(),
+            "testnet",
+            None,
+        )
+        .unwrap();
+        let client_identity = verify_peer_identity(
+            read_certificates(&client_cert, "test client").unwrap()[0].as_ref(),
+            "testnet",
+            None,
+        )
+        .unwrap();
+
+        let server_config = load_server_config(&ca, &crl, &server_cert, &server_key).unwrap();
+        let mut client_config =
+            (*load_client_config(&ca, &crl, &client_cert, &client_key).unwrap()).clone();
+        client_config.alpn_protocols = vec![b"not-ana-peer".to_vec()];
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_thread = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let allowed = HashSet::from([client_identity.node_id]);
+            accept_authenticated(tcp, server_config, "testnet", &allowed).is_err()
+        });
+
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        assert!(connect_authenticated(
+            tcp,
+            Arc::new(client_config),
+            "ana-peer.invalid",
+            "testnet",
+            &server_identity.node_id,
+        )
+        .is_err());
+        assert!(server_thread.join().unwrap());
+    }
+
+    #[test]
     fn alpn_identifier_is_the_peer_protocol() {
         assert_eq!(ALPN_PROTOCOL, b"ana-peer/1");
     }

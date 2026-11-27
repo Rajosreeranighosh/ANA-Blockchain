@@ -185,3 +185,20 @@ The transport test suite must exercise both client and server verification paths
 Positive tests must prove two distinct node certificates issued by the configured test CA can establish TLS 1.3 in both directions, negotiate only `ana-peer/1`, and exchange the existing newline-delimited messages without changing their serialization. Include a multi-node gossip integration test and run all tests on Windows and Ubuntu.
 
 These tests are a release gate. Until the lockfile is committed, the implementation compiles on both CI platforms, and this matrix passes, the loopback-only restrictions remain mandatory and the design remains unapproved for public testnet use.
+
+## 10. Per-peer identity pin configuration (implementation contract)
+
+The live mTLS transport must not accept an arbitrary certificate merely because it chains to the network CA. CA/WebPKI validation, CRL validation, TLS 1.3, ALPN, and the ANA URI-SAN/SPKI consistency check remain mandatory; node pins add an authorization check after certificate validation.
+
+The operator configuration contract for the implementation is:
+
+- `ANA_PEER_PINS`: comma-separated `endpoint=node-id` entries, where endpoint is exactly the peer endpoint string supplied on the node command line and node-id is the expected lowercase 64-character SHA-256 SPKI fingerprint.
+- `ANA_PEER_ALLOWED_NODE_IDS`: comma-separated lowercase 64-character SHA-256 SPKI fingerprints permitted to initiate inbound connections.
+- Empty entries, whitespace-padded entries, duplicate endpoints, duplicate node IDs, malformed fingerprints, and unrecognized endpoints are configuration errors. No wildcard, implicit trust, or default allow-all behavior is permitted.
+- When mTLS is enabled, both variables are required. Every configured outbound endpoint must have exactly one pin. Inbound authentication must match the explicit allowlist.
+- The endpoint mapping is an operator-managed address-to-identity association, not a cryptographic identity itself. DNS/IP changes require updating the endpoint entry without changing the certificate identity.
+- The same node ID must not be admitted through multiple simultaneous inbound connections. The implementation must reserve identity only after successful TLS and pin verification and release it on every connection exit path.
+- These variables are not active until the code parses and validates them at startup and the live handshake path enforces them. Until then, do not deploy mTLS on public interfaces.
+
+This configuration is intentionally explicit and fail-closed. Do not silently derive expected node IDs from the presented certificate, since that would make pinning meaningless.
+
